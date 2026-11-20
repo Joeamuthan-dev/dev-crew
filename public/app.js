@@ -356,7 +356,7 @@ function renderOffice() {
       <div class="office-head">
         <button class="icon-btn panel-toggle" data-panel="head" aria-label="Hide or show the legend" title="Hide or show">–</button>
         <h1>The office</h1>
-        <p>Click someone to give them work or see what they are doing; click a floor to open that project. Free people take breaks in the cafeteria, the garden or on the cricket ground.</p>
+        <p>Click someone to give them work or see what they are doing; click a floor to open that project. Free people from every project meet in the café &amp; lounge: coffee, plants, ping-pong and foosball.</p>
         <ul class="legend">
           <li><i class="lg free">🙂</i>Free</li>
           <li><i class="lg busy">😤</i>Busy</li>

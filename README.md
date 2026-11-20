@@ -114,16 +114,17 @@ The dashboard opens on a 3D office campus:
   tick when a branch waits for review, a warning when a task failed), the project's sign and a
   whiteboard with its queued, running and review work as sticky notes, plants, a printer, a
   bookshelf and a water cooler. Roles a project does not use get no desk.
-- **Places to take a break**: a cafeteria (coffee counter, café tables), a cricket ground where
-  free people play a real little match (bowler, batter, fielders, scoreboard) and a garden with a
-  fountain and benches. An office cat wanders about.
+- **One big café & lounge** where free people from every project meet: a coffee counter, café
+  tables under pendant lamps, plants everywhere (trees in big pots, planter boxes, a tree with a
+  round bench), sofas and bean bags, and a small play area where two people play a ping-pong
+  rally or a game of foosball. An office cat wanders about.
 
 Every crew member has an **emoji head** that shows how they are doing, and a shirt in their
 role's colour:
 
 | Head | Means |
 |---|---|
-| 🟢 green, smiling | free: takes breaks, visits teammates |
+| 🟢 green, smiling | free: goes to the café & lounge, visits teammates |
 | 🔴 red, focused | busy: working, or has work queued, so stays at the desk |
 | 🟠 amber | a branch is waiting for your review |
 | 🟣 purple, dizzy | needs attention: the last task failed or is blocked |

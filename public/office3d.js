@@ -1,11 +1,12 @@
 // The 3D office campus. In the middle, a glass stand-up room with a round table and a holographic
-// globe; around it, one office floor per project; further out, a cafeteria, a cricket ground and
-// a garden. Every crew member has an emoji head that shows how they are doing:
+// globe; around it, one office floor per project; further out, one big café & lounge where the
+// crews of every project meet: coffee counter, café tables, plants everywhere, sofas and a small
+// play area (ping-pong, foosball). Every crew member has an emoji head that shows how they are:
 //   green and smiling = free, red and focused = busy, amber = waiting for your review,
 //   purple and dizzy = needs attention.
-// Free people get up and go to the cafeteria, play cricket, stroll in the garden, visit a
-// teammate or the water cooler; when work arrives they walk back to their desk. When a stand-up
-// is being written, free people gather round the stand-up table.
+// Free people go to the café & lounge, visit a teammate or the water cooler; when work arrives
+// they walk back to their desk. When a stand-up is being written, free people gather round the
+// stand-up table.
 // Click someone and the camera flies to them; they turn to you and wave, and the app pins a card.
 import * as THREE from '/vendor/three.module.min.js';
 
@@ -186,15 +187,6 @@ function boardTexture(todo, doing, review) {
   });
 }
 
-function scoreTexture(runs, wickets) {
-  return canvasTex(256, 128, (g, W, H) => {
-    g.fillStyle = '#14532d'; g.fillRect(0, 0, W, H);
-    g.fillStyle = '#fef08a'; g.font = 'bold 26px sans-serif'; g.textAlign = 'center';
-    g.fillText('DEV XI', W / 2, 42);
-    g.font = 'bold 44px monospace'; g.fillText(`${runs}/${wickets}`, W / 2, 100);
-  });
-}
-
 /* ---------- small geometry helpers ---------- */
 
 function roundedRect(w, d, r) {
@@ -301,12 +293,8 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     trousers: new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.8 }),
     shoe: new THREE.MeshStandardMaterial({ color: '#1f2937', roughness: 0.6 }),
     hand: new THREE.MeshStandardMaterial({ color: '#f1c9a5', roughness: 0.7 }),
-    pitch: new THREE.MeshStandardMaterial({ color: '#d6c38f', roughness: 1 }),
-    field: new THREE.MeshStandardMaterial({ color: '#7fbf6a', roughness: 1 }),
-    rope: new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.6 }),
-    stump: new THREE.MeshStandardMaterial({ color: '#f5deb3', roughness: 0.6 }),
-    leather: new THREE.MeshStandardMaterial({ color: '#b91c1c', roughness: 0.5 }),
-    bat: new THREE.MeshStandardMaterial({ color: '#e9cf9b', roughness: 0.6 }),
+    field: new THREE.MeshStandardMaterial({ color: '#7fbf6a', roughness: 1 }),   // foosball pitch
+    bat: new THREE.MeshStandardMaterial({ color: '#e9cf9b', roughness: 0.6 }),     // paddle handle
     tile: new THREE.MeshStandardMaterial({ color: '#f1e9dc', roughness: 0.9 }),
     red: new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.5 }),
     flowers: ['#f472b6', '#facc15', '#a78bfa', '#fb7185', '#f97316'].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7 })),
@@ -484,14 +472,16 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     const cup = cyl(0.06, 0.05, 0.13, M.white, 0, -0.56, 0.08, 10);
     cup.visible = false;
     arms[1].add(cup);
-    const bat = new THREE.Group();
-    bat.add(box(0.1, 0.62, 0.04, M.bat, 0, -0.32, 0));
-    bat.add(box(0.035, 0.26, 0.035, M.dark, 0, 0.1, 0));
-    bat.position.set(0, -0.5, 0.08);
-    bat.rotation.x = -0.4;
-    bat.visible = false;
-    arms[1].add(bat);
-    return { root, legs, body, head, arms, bodyMat, faceMat, cup, bat };
+    // a table-tennis paddle: red face on a wooden handle
+    const paddle = new THREE.Group();
+    const face = cyl(0.11, 0.11, 0.02, M.red, 0, -0.14, 0, 16);
+    face.rotation.x = Math.PI / 2;
+    paddle.add(face);
+    paddle.add(box(0.035, 0.12, 0.025, M.bat, 0, -0.01, 0));
+    paddle.position.set(0, -0.52, 0.06);
+    paddle.visible = false;
+    arms[1].add(paddle);
+    return { root, legs, body, head, arms, bodyMat, faceMat, cup, paddle };
   }
 
   /* ---------------- the stand-up room and its globe ---------------- */
@@ -575,7 +565,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   /* ---------------- zones, places and agents ---------------- */
 
   let zones = [];
-  let places = {};   // cafeteria, cricket, garden
+  let places = {};   // the café & lounge
   let zoneKey = '';
   const agents = new Map();
   const pickables = [];
@@ -595,7 +585,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   }
   const zoneRadius = n => Math.max(15, 8.2 / Math.sin(Math.PI / Math.max(n, 2)));
 
-  /** Angles for the cafeteria, cricket ground and garden: as far as possible from the floors. */
+  /** Angles for shared places: as far as possible from the project floors. */
   function placeAngles(zoneAngs) {
     const used = [...zoneAngs];
     const out = [];
@@ -775,9 +765,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
 
     const pAngs = placeAngles(angs);
     const RP = R + 15;
-    places.cafe = buildCafe(pAngs[0], RP);
-    places.cricket = buildCricket(pAngs[1], RP + 2);
-    places.garden = buildGarden(pAngs[2], RP - 1);
+    places.lounge = buildLounge(pAngs[0], RP + 3);
     for (const pl of Object.values(places)) {
       addPath(pl.ang, PLAZA_R + 1.2, pl.radius - pl.depth / 2 - 0.2);
       placeLabels.push(label('ol-zone ol-place', pl.label));
@@ -814,135 +802,154 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   }
   const spotAt = (pl, lx, lz, facingLocal, sit, pose) => ({ area: pl.kind, place: pl, pos: W(pl, lx, lz), facing: facingLocal + pl.rot, sit, pose, taken: null });
 
-  function buildCafe(ang, radius) {
-    const pl = placeBase(ang, radius, 11, 8);
-    pl.kind = 'cafe';
-    pl.label = '☕ Cafeteria';
-    const deck = slab(11, 8, 0.08, 0.6, M.tile);
-    pl.group.add(deck);
-    // counter with a coffee machine, a fridge and a menu board at the back
-    pl.group.add(box(5, 1.0, 0.8, M.oak, -1, 0.5, -3.2));
-    pl.group.add(box(5.1, 0.06, 0.9, M.white, -1, 1.03, -3.2));
+  /**
+   * The café & lounge: one big shared place where the crews of every project meet. A coffee
+   * counter, café tables, plants everywhere, a lounge corner and a small play area with a
+   * ping-pong table and a foosball table. Local plan: entrance at +z, counter at the back (-z).
+   */
+  function buildLounge(ang, radius) {
+    const pl = placeBase(ang, radius, 20, 14);
+    pl.kind = 'lounge';
+    pl.label = '☕ Café &amp; lounge';
+    pl.group.add(slab(20, 14, 0.08, 0.8, M.tile));
+    const rug = slab(6.4, 5.2, 0.02, 0.4, new THREE.MeshStandardMaterial({ color: '#c4b5fd', roughness: 1 }));
+    rug.position.set(4.2, 0.08, -2.4);
+    pl.group.add(rug);
+    const playMat = slab(5.6, 9.6, 0.02, 0.4, new THREE.MeshStandardMaterial({ color: '#93c5fd', roughness: 1 }));
+    playMat.position.set(7.0, 0.08, 1.2);
+    pl.group.add(playMat);
+
+    // the coffee counter along the back, with a coffee machine, a fridge and a menu board
+    pl.group.add(box(8, 1.0, 0.8, M.oak, -4.5, 0.5, -6.1));
+    pl.group.add(box(8.1, 0.06, 0.9, M.white, -4.5, 1.03, -6.1));
     const machine = new THREE.Group();
     machine.add(box(0.6, 0.7, 0.5, M.dark, 0, 0.35, 0));
     machine.add(box(0.4, 0.08, 0.3, M.metal, 0, 0.12, 0.1));
-    machine.position.set(-2.6, 1.06, -3.25);
+    machine.position.set(-7.4, 1.06, -6.15);
     pl.group.add(machine);
-    pl.machineTop = W(pl, -2.6, -3.25).setY(1.85);
-    pl.group.add(box(1.0, 2.0, 0.8, M.white, 3.4, 1.0, -3.3));
-    pl.group.add(box(0.04, 0.8, 0.04, M.metal, 3.0, 1.2, -2.88));
-    const menu = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 0.9), new THREE.MeshBasicMaterial({ map: signTexture('COFFEE · CHAI · SNACKS') }));
-    menu.position.set(-1, 2.1, -3.62);
+    for (let k = 0; k < 4; k++) pl.group.add(cyl(0.06, 0.05, 0.12, M.white, -6.5 + k * 0.3, 1.12, -5.9, 10));
+    pl.group.add(box(1.0, 2.0, 0.8, M.white, -9.2, 1.0, -6.1));
+    pl.group.add(box(0.04, 0.8, 0.04, M.metal, -8.8, 1.2, -5.68));
+    const menu = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.9), new THREE.MeshBasicMaterial({ map: signTexture('COFFEE · CHAI · SNACKS') }));
+    menu.position.set(-4.5, 2.2, -6.62);
     pl.group.add(menu);
-    pl.group.add(box(2.3, 1.0, 0.06, M.dark, -1, 2.1, -3.66));
-    // round café tables with stools and umbrellas
-    for (const [tx, tz, uc] of [[-2.6, 0.9, '#f97316'], [1.8, 0.9, '#0ea5e9']]) {
+    pl.group.add(box(3.3, 1.0, 0.06, M.dark, -4.5, 2.2, -6.66));
+    pl.spots.push(spotAt(pl, -5.8, -5.2, Math.PI, false, 'cafe'));
+    pl.spots.push(spotAt(pl, -3.6, -5.2, Math.PI, false, 'cafe'));
+    pl.spots.push(spotAt(pl, -1.8, -5.2, Math.PI, false, 'cafe'));
+
+    // café tables with stools, a pendant lamp over each
+    for (const [tx, tz] of [[-7, -2.2], [-3.4, -2.2], [-7, 1.8], [-3.4, 1.8]]) {
       pl.group.add(cyl(0.6, 0.6, 0.05, M.white, tx, 0.78, tz, 24));
       pl.group.add(cyl(0.05, 0.05, 0.74, M.metal, tx, 0.4, tz, 8));
-      pl.group.add(cyl(0.03, 0.03, 1.9, M.metal, tx, 1.7, tz, 6));
-      const umb = new THREE.Mesh(geo('umbrella', () => new THREE.ConeGeometry(1.4, 0.5, 10)), new THREE.MeshStandardMaterial({ color: uc, roughness: 0.6, flatShading: true }));
-      umb.position.set(tx, 2.6, tz);
-      umb.castShadow = true;
-      pl.group.add(umb);
-      for (let k = 0; k < 3; k++) {
-        const a = (k / 3) * Math.PI * 2 + 0.4;
-        const sx = tx + Math.cos(a) * 1.05;
-        const sz = tz + Math.sin(a) * 1.05;
+      pl.group.add(cyl(0.012, 0.012, 1.4, M.dark, tx, 2.7, tz, 4));
+      pl.group.add(cyl(0.08, 0.28, 0.22, M.lampGlow, tx, 1.95, tz, 14));
+      for (let k = 0; k < 4; k++) {
+        const a = (k / 4) * Math.PI * 2 + Math.PI / 4;
+        const sx = tx + Math.cos(a) * 1.0;
+        const sz = tz + Math.sin(a) * 1.0;
         pl.group.add(cyl(0.22, 0.2, 0.06, M.red, sx, 0.52, sz, 14));
         pl.group.add(cyl(0.04, 0.04, 0.5, M.metal, sx, 0.26, sz, 6));
         pl.spots.push(spotAt(pl, sx, sz, Math.atan2(tx - sx, tz - sz), true, 'cafe'));
       }
+      pl.group.add(cyl(0.06, 0.05, 0.12, M.white, tx + 0.2, 0.86, tz, 10));
     }
-    pl.spots.push(spotAt(pl, -1.6, -2.3, Math.PI, false, 'cafe'));
-    pl.spots.push(spotAt(pl, -0.2, -2.3, Math.PI, false, 'cafe'));
-    const plant = makePlant(1);
-    plant.position.set(5, 0.08, 3.3);
-    pl.group.add(plant);
-    return pl;
-  }
 
-  function buildCricket(ang, radius) {
-    const pl = placeBase(ang, radius, 15, 11);
-    pl.kind = 'cricket';
-    pl.label = '🏏 Cricket ground';
-    const field = new THREE.Mesh(geo('oval', () => { const g = new THREE.CircleGeometry(1, 48); g.rotateX(-Math.PI / 2); return g; }), M.field);
-    field.scale.set(7.4, 1, 5.4);
-    field.position.y = 0.02;
-    field.receiveShadow = true;
-    pl.group.add(field);
-    const rope = new THREE.Mesh(new THREE.TorusGeometry(1, 0.025, 6, 64), M.rope);
-    rope.scale.set(7.2, 5.2, 1);
-    rope.rotation.x = Math.PI / 2;
-    rope.position.y = 0.06;
-    pl.group.add(rope);
-    const strip = box(6.2, 0.02, 1.1, M.pitch, 0, 0.04, 0, false);
-    pl.group.add(strip);
-    for (const sx of [-2.4, 2.4]) pl.group.add(box(0.03, 0.022, 1.0, M.paper, sx, 0.055, 0, false));
-    for (const sx of [-2.8, 2.8]) {
-      for (const dz of [-0.11, 0, 0.11]) pl.group.add(cyl(0.025, 0.025, 0.72, M.stump, sx, 0.4, dz, 6));
-      pl.group.add(box(0.03, 0.03, 0.26, M.stump, sx, 0.78, 0, false));
-    }
-    const sbMat = new THREE.MeshBasicMaterial({ map: scoreTexture(0, 0) });
-    const board = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 1.1), sbMat);
-    board.position.set(0, 1.9, -5.3);
-    pl.group.add(board);
-    for (const sx of [-1, 1]) pl.group.add(box(0.08, 1.4, 0.08, M.dark, sx, 0.7, -5.34));
-    pl.sbMat = sbMat;
-    pl.runs = 0;
-    pl.wkts = 0;
-    // 0 batter, 1 bowler, 2..5 fielders
-    pl.spots.push(spotAt(pl, -2.45, 0.25, Math.PI / 2, false, 'bat'));
-    pl.spots.push(spotAt(pl, 3.6, 0, -Math.PI / 2, false, 'bowl'));
-    for (const [fx, fz] of [[-0.5, 3.4], [-3.8, -2.6], [1.6, -3.4], [-5.2, 1.2]]) pl.spots.push(spotAt(pl, fx, fz, Math.atan2(-2.45 - fx, 0 - fz), false, 'field'));
-    pl.ballMesh = ball(0.07, M.leather, 0, 0, 0, 10);
-    scene.add(pl.ballMesh);
-    builtStatic.push(pl.ballMesh);
-    pl.cycle = -1;
-    return pl;
-  }
-
-  function buildGarden(ang, radius) {
-    const pl = placeBase(ang, radius, 12, 10);
-    pl.kind = 'garden';
-    pl.label = '🌳 Garden';
-    const lawn = slab(12, 10, 0.05, 2.5, new THREE.MeshStandardMaterial({ color: '#8cc97a', roughness: 1 }));
-    pl.group.add(lawn);
-    // fountain in the middle
-    pl.group.add(cyl(1.3, 1.4, 0.4, M.pot, 0, 0.2, 0, 32));
-    const pond = cyl(1.15, 1.15, 0.05, M.water, 0, 0.38, 0, 32);
-    pl.group.add(pond);
-    pl.group.add(cyl(0.12, 0.18, 0.9, M.pot, 0, 0.7, 0, 12));
-    pl.spray = [];
-    for (let k = 0; k < 14; k++) {
-      const drop = ball(0.045, M.water, 0, 1.2, 0, 6);
-      drop.castShadow = false;
-      pl.group.add(drop);
-      pl.spray.push({ m: drop, a: (k / 14) * Math.PI * 2, o: k / 14 });
-    }
-    // trees round the edge, flower beds, benches facing the fountain
-    for (const [tx, tz, h] of [[-5, -4, 2.8], [5, -4, 3.2], [-5.2, 1.2, 2.4], [5.1, 1.8, 2.6], [-2.6, -4.3, 2.2], [2.8, -4.4, 2.5]]) {
-      const tree = makeTree(h);
-      tree.position.set(tx, 0.05, tz);
+    // plants everywhere: trees in big pots in the corners, planter boxes along the sides, and a
+    // tree in the middle with a round bench
+    for (const [px, pz] of [[-9.2, 6.2], [9.2, 6.2], [9.2, -6.2], [-0.4, -6.2]]) {
+      const pot = cyl(0.55, 0.45, 0.7, M.terracotta, px, 0.35, pz, 16);
+      pl.group.add(pot);
+      const tree = makeTree(2.4);
+      tree.position.set(px, 0.7, pz);
+      tree.scale.setScalar(0.8);
       pl.group.add(tree);
     }
-    for (let k = 0; k < 40; k++) {
-      const a = (k / 40) * Math.PI * 2;
-      const r = 2.1 + (k % 3) * 0.12;
-      pl.group.add(ball(0.09, M.flowers[k % 5], Math.cos(a) * r, 0.15, Math.sin(a) * r, 6));
+    for (const [bx, bz, len, rot] of [[-9.6, 0, 8, Math.PI / 2], [2.6, 6.4, 3.6, 0]]) {
+      const planter = new THREE.Group();
+      planter.add(box(len, 0.5, 0.6, M.oak, 0, 0.25, 0));
+      for (let k = 0; k < Math.round(len / 0.7); k++) {
+        const bush = new THREE.Mesh(geo(`bush${k % 3}`, () => new THREE.IcosahedronGeometry(0.34 - (k % 3) * 0.06, 0)), k % 2 ? M.leaf : M.leaf2);
+        bush.position.set(-len / 2 + 0.35 + k * 0.7, 0.7, 0);
+        bush.castShadow = true;
+        planter.add(bush);
+        if (k % 2 === 0) planter.add(ball(0.08, M.flowers[k % 5], -len / 2 + 0.35 + k * 0.7, 0.95, 0.12, 6));
+      }
+      planter.position.set(bx, 0.08, bz);
+      planter.rotation.y = rot;
+      planter.userData.sway = true;
+      pl.group.add(planter);
     }
-    for (const [bx, bz] of [[-3, 2.4], [3, 2.4], [0, -3.2]]) {
-      // benches face the fountain; two seats on each
-      const fwd = Math.atan2(-bx, -bz);
-      const bench = makeBench();
-      bench.position.set(bx, 0.05, bz);
-      bench.rotation.y = fwd;
-      pl.group.add(bench);
-      for (const off of [-0.4, 0.4]) {
-        const [ox, oz] = rotXZ(off, 0.05, fwd);
-        pl.spots.push(spotAt(pl, bx + ox, bz + oz, fwd, true, 'bench'));
+    pl.group.add(cyl(1.0, 1.0, 0.45, M.oak, -5.2, 0.3, 4.9, 24));
+    const midTree = makeTree(2.8);
+    midTree.position.set(-5.2, 0.5, 4.9);
+    pl.group.add(midTree);
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * Math.PI * 2 + Math.PI / 4;
+      pl.spots.push(spotAt(pl, -5.2 + Math.cos(a) * 1.25, 4.9 + Math.sin(a) * 1.25, Math.atan2(Math.cos(a), Math.sin(a)), true, 'cafe'));
+    }
+
+    // the lounge corner: two sofas over a coffee table, and bean bags
+    const sofaMat = new THREE.MeshStandardMaterial({ color: '#4f46e5', roughness: 0.7 });
+    for (const [sz, face] of [[-4.2, 0], [-0.6, Math.PI]]) {
+      const sofa = new THREE.Group();
+      sofa.add(box(2.6, 0.45, 0.9, sofaMat, 0, 0.32, 0));
+      sofa.add(box(2.6, 0.6, 0.25, sofaMat, 0, 0.75, -0.42));
+      for (const sx of [-1.25, 1.25]) sofa.add(box(0.2, 0.55, 0.9, sofaMat, sx, 0.45, 0));
+      sofa.position.set(4.2, 0.08, sz);
+      sofa.rotation.y = face;
+      pl.group.add(sofa);
+      for (const ox of [-0.6, 0.6]) {
+        const [dx, dz] = rotXZ(ox, 0.1, face);
+        pl.spots.push(spotAt(pl, 4.2 + dx, sz + dz, face, true, 'cafe'));
       }
     }
-    for (const [sx, sz] of [[-1.8, 1.8], [2.1, -1.4], [-2.2, -1.6]]) pl.spots.push(spotAt(pl, sx, sz, Math.atan2(-sx, -sz), false, 'stroll'));
+    pl.group.add(box(1.6, 0.35, 0.9, M.oak, 4.2, 0.25, -2.4));
+    pl.group.add(cyl(0.16, 0.12, 0.2, M.terracotta, 4.5, 0.52, -2.4, 10));
+    pl.group.add(ball(0.18, M.leaf2, 4.5, 0.72, -2.4, 8));
+    const beanColors = ['#f97316', '#22c55e', '#ec4899'];
+    for (const [k, [bx, bz]] of [[1.4, 2.6], [2.8, 3.6], [1.2, 4.6]].entries()) {
+      const bag = ball(0.45, new THREE.MeshStandardMaterial({ color: beanColors[k], roughness: 0.9 }), bx, 0.32, bz, 14);
+      bag.scale.set(1, 0.7, 1);
+      pl.group.add(bag);
+      pl.spots.push(spotAt(pl, bx, bz, Math.atan2(-bx, -bz + 1), true, 'cafe'));
+    }
+
+    // the play area: ping-pong (players at each end) and foosball (players at each side)
+    const pong = new THREE.Group();
+    pong.add(box(1.5, 0.05, 2.74, new THREE.MeshStandardMaterial({ color: '#1d4ed8', roughness: 0.5 }), 0, 0.76, 0));
+    pong.add(box(1.52, 0.012, 0.02, M.white, 0, 0.79, 0, false));
+    pong.add(box(1.6, 0.16, 0.02, M.white, 0, 0.86, 0, false));
+    for (const [lx, lz] of [[-0.65, -1.2], [0.65, -1.2], [-0.65, 1.2], [0.65, 1.2]]) pong.add(box(0.05, 0.74, 0.05, M.dark, lx, 0.37, lz));
+    pong.position.set(7.0, 0.08, 3.2);
+    pl.group.add(pong);
+    pl.pong = { center: [7.0, 3.2] };
+    pl.spots.push(spotAt(pl, 7.0, 3.2 - 2.0, 0, false, 'pong'));
+    pl.spots.push(spotAt(pl, 7.0, 3.2 + 2.0, Math.PI, false, 'pong'));
+    pl.pongSpots = pl.spots.slice(-2);
+    pl.pongBall = ball(0.05, M.white, 0, 0, 0, 8);
+    pl.pongBall.castShadow = false;
+    scene.add(pl.pongBall);
+    builtStatic.push(pl.pongBall);
+
+    const foos = new THREE.Group();
+    foos.add(box(1.2, 0.5, 0.75, M.oak, 0, 0.7, 0));
+    foos.add(box(1.1, 0.02, 0.65, M.field, 0, 0.96, 0, false));
+    for (const [lx, lz] of [[-0.5, -0.3], [0.5, -0.3], [-0.5, 0.3], [0.5, 0.3]]) foos.add(box(0.08, 0.5, 0.08, M.dark, lx, 0.25, lz));
+    pl.rods = [];
+    for (let k = 0; k < 4; k++) {
+      const rod = new THREE.Group();
+      rod.position.set(-0.42 + k * 0.28, 1.0, 0);
+      rod.add(box(0.025, 0.025, 1.1, M.metal, 0, 0, 0, false));
+      for (const fz of [-0.18, 0, 0.18]) rod.add(box(0.05, 0.14, 0.04, k % 2 ? M.red : M.dark, 0, -0.06, fz, false));
+      foos.add(rod);
+      pl.rods.push(rod);
+    }
+    foos.position.set(7.0, 0.08, -3.4);
+    pl.group.add(foos);
+    pl.spots.push(spotAt(pl, 7.0, -3.4 - 0.85, 0, false, 'foos'));
+    pl.spots.push(spotAt(pl, 7.0, -3.4 + 0.85, Math.PI, false, 'foos'));
+    pl.foosSpots = pl.spots.slice(-2);
     return pl;
   }
 
@@ -1069,7 +1076,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     a.dest = dest;
     a.sitGoal = 0;
     a.pose = null;
-    a.arrived = false; // not at the new spot yet (the cricket game waits for real arrivals)
+    a.arrived = false; // not at the new spot yet (the games wait for real arrivals)
   }
 
   const freeSpot = (list, pose) => {
@@ -1084,14 +1091,14 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       if (s && Math.random() < 0.8) return { kind: 'spot', spot: s };
     }
     const r = Math.random();
-    if (r < 0.26 && places.cafe) { const s = freeSpot(places.cafe.spots); if (s) return { kind: 'spot', spot: s, stay: rand(14, 28) }; }
-    if (r < 0.52 && places.cricket) {
-      const c = places.cricket.spots;
-      // fill the batter and bowler first, then the field
-      const s = (!c[0].taken && c[0]) || (!c[1].taken && c[1]) || freeSpot(c);
-      if (s) return { kind: 'spot', spot: s, stay: rand(22, 40) };
+    const L = places.lounge;
+    if (L && r < 0.24) {
+      // a game: join someone waiting at a table first, so games actually start
+      const waiting = [L.pongSpots, L.foosSpots].find(pair => pair.some(s => s.taken) && pair.some(s => !s.taken));
+      const s = waiting ? waiting.find(x => !x.taken) : freeSpot(L.spots.filter(x => x.pose === 'pong' || x.pose === 'foos'));
+      if (s) return { kind: 'spot', spot: s, stay: rand(20, 36) };
     }
-    if (r < 0.7 && places.garden) { const s = freeSpot(places.garden.spots); if (s) return { kind: 'spot', spot: s, stay: rand(12, 24) }; }
+    if (L && r < 0.7) { const s = freeSpot(L.spots, 'cafe'); if (s) return { kind: 'spot', spot: s, stay: rand(14, 30) }; }
     if (r < 0.78) return { kind: 'cooler' };
     if (r < 0.9) {
       const mates = [...agents.values()].filter(m => m.zone === a.zone && m !== a);
@@ -1112,7 +1119,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     }
     for (const pl of Object.values(places)) {
       const [lx, lz] = toLocal(pl, p);
-      if (Math.abs(lx) < pl.width / 2 && Math.abs(lz) < pl.depth / 2) return pl.kind === 'cafe' ? 0.08 : 0.05;
+      if (Math.abs(lx) < pl.width / 2 && Math.abs(lz) < pl.depth / 2) return 0.08;
     }
     return 0.02;
   }
@@ -1186,16 +1193,15 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     }
     const pose = a.arrived && !speed ? a.pose : null;
     if (pose === 'cafe') armR = -1.5 + Math.sin(t * 0.8 + a.phase) * 0.25; // sipping coffee
-    if (pose === 'bat') { armR = a.swing ? -2.2 + a.swing * 2.6 : -0.9; armL = armR * 0.8; armZ = 0.2; }
-    if (pose === 'bowl') { const w = a.bowlArm || 0; armR = -0.2 - w * 3.2; }
-    if (pose === 'field') { armL = -0.5; armR = -0.5 + Math.sin(t * 2 + a.phase) * 0.15; }
+    if (pose === 'pong') { const sw = a.paddleSwing || 0; armR = -0.9 - sw * 0.7; armZ = 0.25 - sw * 0.6; armL = -0.3; }
+    if (pose === 'foos') { armL = -1.25 + Math.sin(t * 6 + a.phase) * 0.12; armR = -1.25 + Math.sin(t * 6 + a.phase + 2) * 0.12; }
     f.arms[0].rotation.x = armL;
     f.arms[1].rotation.x = armR;
     a.wave += ((a.focused ? 1 : 0) - a.wave) * Math.min(1, dt * 6);
     f.arms[1].rotation.z = a.wave * (2.5 + Math.sin(t * 9) * 0.35) + armZ;
     f.arms[0].rotation.z = -armZ;
     f.cup.visible = pose === 'cafe';
-    f.bat.visible = pose === 'bat';
+    f.paddle.visible = pose === 'pong';
 
     f.head.rotation.x = typing ? 0.12 + Math.sin(t * 2 + a.phase) * 0.04 : -0.05;
     f.head.rotation.y = a.focused || speed ? 0 : Math.sin(t * 0.5 + a.phase) * 0.3;
@@ -1231,51 +1237,42 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     }
   }
 
-  /* ---------------- cricket ---------------- */
+  /* ---------------- the play area ---------------- */
 
-  function playCricket(t, dt) {
-    const pl = places.cricket;
+  const here = s => (s.taken && s.taken.arrived ? s.taken : null);
+
+  /** Ping-pong: once both players are at the table, the ball goes back and forth with a bounce. */
+  function playGames(t) {
+    const pl = places.lounge;
     if (!pl) return;
-    const [batSpot, bowlSpot] = pl.spots;
-    const batter = batSpot.taken && batSpot.taken.arrived ? batSpot.taken : null;
-    const bowler = bowlSpot.taken && bowlSpot.taken.arrived ? bowlSpot.taken : null;
-    const ballM = pl.ballMesh;
-    if (!batter || !bowler) {
-      ballM.position.copy(W(pl, 2.9, 0.15)).setY(0.12);
-      if (batter) batter.swing = 0;
-      if (bowler) bowler.bowlArm = 0;
-      return;
+    const [a, b] = pl.pongSpots.map(here);
+    const [cx, cz] = pl.pong.center;
+    const ballM = pl.pongBall;
+    if (a && b) {
+      const period = 1.4;
+      const p = (t % period) / period;              // 0..1: a to b, then b to a
+      const there = p < 0.5;
+      const k = there ? p * 2 : (p - 0.5) * 2;
+      const z0 = there ? -1.25 : 1.25;
+      const z1 = -z0;
+      const lz = z0 + (z1 - z0) * k;
+      // one bounce on the far half of the table
+      const h = k < 0.6 ? Math.sin((k / 0.6) * Math.PI) * 0.35 : Math.sin(((k - 0.6) / 0.4) * Math.PI) * 0.22;
+      ballM.position.copy(W(pl, cx + Math.sin(t * 2.3) * 0.25, cz + lz)).setY(0.08 + 0.81 + h);
+      a.paddleSwing = there ? Math.max(0, 1 - k * 4) : Math.max(0, (k - 0.75) * 4);
+      b.paddleSwing = there ? Math.max(0, (k - 0.75) * 4) : Math.max(0, 1 - k * 4);
+    } else {
+      ballM.position.copy(W(pl, cx + 0.4, cz)).setY(0.08 + 0.81);
+      if (a) a.paddleSwing = 0;
+      if (b) b.paddleSwing = 0;
     }
-    const period = 3.2;
-    const cycle = Math.floor(t / period);
-    const p = (t % period) / period;
-    if (cycle !== pl.cycle) {
-      pl.cycle = cycle;
-      const fielders = pl.spots.slice(2).filter(s => s.taken && s.taken.arrived);
-      pl.target = fielders.length ? pickOne(fielders).pos.clone() : W(pl, rand(-5, 2), rand(-3.5, 3.5));
-      pl.outcome = Math.random();
-      if (pl.outcome < 0.12) pl.wkts = (pl.wkts + 1) % 10;
-      else pl.runs += pl.outcome > 0.85 ? 4 : pl.outcome > 0.96 ? 6 : 1;
-      if (pl.runs > 300) { pl.runs = 0; pl.wkts = 0; }
-      pl.sbMat.map.dispose();
-      pl.sbMat.map = scoreTexture(pl.runs, pl.wkts);
-      pl.sbMat.needsUpdate = true;
-    }
-    const from = W(pl, 3.4, 0.25).setY(2.1);
-    const pitchAt = W(pl, -1.0, 0.2).setY(0.08);
-    const at = W(pl, -2.35, 0.25).setY(0.6);
-    bowler.bowlArm = p < 0.3 ? p / 0.3 : Math.max(0, 1 - (p - 0.3) * 4);
-    batter.swing = p > 0.52 && p < 0.7 ? (p - 0.52) / 0.18 : 0;
-    if (p < 0.3) ballM.position.copy(bowler.pos).setY(1.4 + p * 2);
-    else if (p < 0.43) ballM.position.lerpVectors(from, pitchAt, (p - 0.3) / 0.13);
-    else if (p < 0.55) ballM.position.lerpVectors(pitchAt, at, (p - 0.43) / 0.12);
-    else {
-      const k = Math.min(1, (p - 0.55) / 0.4);
-      const out = pl.outcome < 0.12;
-      const end = out ? W(pl, -2.8, 0).setY(0.5) : pl.target.clone().setY(0.3);
-      ballM.position.lerpVectors(at, end, k);
-      if (!out) ballM.position.y += Math.sin(k * Math.PI) * (pl.outcome > 0.85 ? 3.5 : 1.4);
-    }
+    // foosball: the rods slide and spin while two people play
+    const [f1, f2] = pl.foosSpots.map(here);
+    pl.rods.forEach((rod, i) => {
+      const on = f1 && f2;
+      rod.position.z = on ? Math.sin(t * 3 + i * 1.3) * 0.12 : 0;
+      rod.rotation.z = on ? Math.sin(t * 5 + i) * 0.6 : 0;
+    });
   }
 
   /* ---------------- confetti ---------------- */
@@ -1371,7 +1368,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         else if (a.state === 'failed') text = `<b>${esc(role.short)}</b> needs attention: ${esc(last.title)}`;
         else if (rv) text = `<b>${esc(role.short)}</b> ${rv} to review`;
         else if (queued) text = `<b>${esc(role.short)}</b> ${queued} queued`;
-        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ cafe: 'at the cafeteria', cricket: 'playing cricket', garden: 'in the garden', room: 'in the stand-up room' }[a.where] || ''}` : ''}`;
+        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ lounge: a.pose === 'pong' ? 'playing ping-pong' : a.pose === 'foos' ? 'playing foosball' : 'at the café', room: 'in the stand-up room' }[a.where] || ''}` : ''}`;
         if (lab.innerHTML !== text) lab.innerHTML = text;
         lab.dataset.state = a.state;
         lab.title = run ? `${role.name}: ${run.title}` : `${role.name} — click to talk`;
@@ -1598,17 +1595,8 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       for (const sc of a.screens) if (sc.material !== screenMat[kind]) sc.material = screenMat[kind];
     }
 
-    if (!still) playCricket(t, dt);
-    else if (places.cricket) places.cricket.ballMesh.position.copy(W(places.cricket, 2.9, 0.15)).setY(0.12);
+    playGames(t);
     stepConfetti(off ? 0 : dt);
-
-    // fountain spray and the coffee machine
-    if (places.garden) {
-      for (const d of places.garden.spray) {
-        const k = ((t * 0.6 + d.o) % 1);
-        d.m.position.set(Math.cos(d.a) * k * 0.9, 1.2 + Math.sin(k * Math.PI) * 0.7 - k * 0.6, Math.sin(d.a) * k * 0.9);
-      }
-    }
     // the cat strolls round the plaza
     if (cat && !still) {
       if (cat.rest > 0) cat.rest -= dt;
