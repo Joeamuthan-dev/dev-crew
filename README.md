@@ -104,19 +104,38 @@ what the shipped `crew.config.json` points at.
 
 ## The office
 
-The dashboard opens on a 3D office: one floor per project around a central stand-up hub, six
-desks per floor, one agent per desk in their role's colour.
+The dashboard opens on a 3D office campus:
 
-- Free agents get up and wander: along the aisles, to the water cooler, to a teammate's desk,
-  over to the stand-up hub. When work arrives they walk back and sit down.
-- An agent who is **working** types at their desk under a pulsing ring, with what they are doing
-  right now floating above them. The **Live** panel lists each step as it happens.
-- An amber marker means a branch is **waiting for your review**; red means the last task **failed**.
-- **Click an agent**: the camera flies to them, they turn and wave, and a card shows what they
-  are doing in their own words, their monday.com tickets, and the person to ask about their area.
-  **Click a floor** to open that project; click the hub for the Today overview.
-- Drag to pan, scroll to zoom, double-click (or **Fit**) to see the whole office. A floor's rim
-  takes the colour of its latest stand-up: green, amber or red.
+- **The stand-up room** in the middle: a glass room with a round table, green chairs and a
+  holographic globe with one orbiting light per project in its stand-up health colour. It spins
+  faster and pulses while a stand-up is being written, and free crew members gather round the
+  table.
+- **One floor per project** around it: desks with dual monitors (code scrolling while working, a
+  tick when a branch waits for review, a warning when a task failed), the project's sign and a
+  whiteboard with its queued, running and review work as sticky notes, plants, a printer, a
+  bookshelf and a water cooler. Roles a project does not use get no desk.
+- **One big café & lounge** where free people from every project meet: a coffee counter, café
+  tables under pendant lamps, plants everywhere (trees in big pots, planter boxes, a tree with a
+  round bench), sofas and bean bags, and a small play area where two people play a ping-pong
+  rally or a game of foosball. An office cat wanders about.
+
+Every crew member has an **emoji head** that shows how they are doing, and a shirt in their
+role's colour:
+
+| Head | Means |
+|---|---|
+| 🟢 green, smiling | free: goes to the café & lounge, visits teammates |
+| 🔴 red, focused | busy: working, or has work queued, so stays at the desk |
+| 🟠 amber | a branch is waiting for your review |
+| 🟣 purple, dizzy | needs attention: the last task failed or is blocked |
+
+When a task finishes there is a little burst of confetti. **Click someone**: the camera flies to
+them, they turn and wave, and a card shows what they are doing, their monday.com tickets and the
+person to ask. **Click a floor** to open that project; click the stand-up room for the Today
+overview. Drag to pan, scroll to zoom, double-click (or **Fit**) to see the whole campus. The
+legend and the Live panel fold away with their **–** button. Settings → Appearance controls
+motion (reduced keeps everyone at their desks, off stops everything), 3D quality and a simple 2D
+view.
 
 ## Handoffs and plans
 

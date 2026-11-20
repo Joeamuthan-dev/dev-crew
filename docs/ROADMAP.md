@@ -159,7 +159,18 @@ One page for app-wide controls. It's stored in `crew.config.local.json` under `s
   notifications.
 - **Permissions:** a read-only view of what each role is allowed and blocked from running.
 
-## 6. Dashboard redesign
+## 6. Dashboard redesign — 3D campus done on `feature/office-v2`
+
+Done (part 1, the office): the 3D office is now a campus: a glass stand-up room with a round
+table and a holographic globe (orbiting project lights), project floors with a back wall, sign,
+live whiteboard, dual-monitor desks showing each person's state, plants, printer, bookshelf and
+cooler, and one big café & lounge that free people from every project walk to (coffee counter,
+café tables, plants everywhere, sofas, bean bags, and a play area with ping-pong and foosball).
+A first version had a separate cafeteria, cricket ground and garden; one shared place keeps the
+crews together and the campus compact. Workers have emoji heads coloured by state (green free, red busy, amber review, purple needs
+attention), confetti when a task finishes, an office cat, and the overlay panels fold away.
+Still to do (part 2, the rest of the dashboard): the design system, transitions for drawers and
+pages, animated numbers, and the accessibility pass below.
 
 **Goal:** a cleaner, calmer interface with purposeful motion and a better 3D office.
 

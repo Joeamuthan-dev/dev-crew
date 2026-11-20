@@ -365,7 +365,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 .ol-agent b { color: var(--rc); font: 700 10.5px var(--mono); margin-right: 4px; }
 .ol-agent[data-state="working"] { color: var(--text); }
 .ol-agent[data-state="review"] { border-left-color: #f59e0b; }
-.ol-agent[data-state="failed"] { border-left-color: #ef4444; color: var(--red); }
+.ol-agent[data-state="failed"] { border-left-color: #8b5cf6; color: #8b5cf6; }
+.ol-agent[data-state="working"], .ol-agent[data-state="queued"] { border-left-color: #ef4444; }
+.ol-agent[data-state="idle"] { border-left-color: #22c55e; }
 .ol-agent.hover { color: var(--text); box-shadow: var(--shadow-lg); z-index: 2; }
 
 .ol-zone {
@@ -378,8 +380,16 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 .ol-hub { font-size: 12px; padding: 5px 11px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .ol-hub b { font-weight: 600; margin-right: 4px; }
 
+/* the office's overlay panels fold down to their title so the campus stays visible */
+.panel-toggle { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; font-size: 15px; line-height: 1; }
+.office-head.folded p, .office-head.folded .legend { display: none; }
+.office-head.folded { padding: 8px 40px 8px 12px; }
+.office-head.folded h1 { font-size: 14px; }
+.office-feed.folded ol { display: none; }
+.office-feed.folded { width: auto; padding: 8px 40px 8px 12px; }
+.office-feed.folded h2 { margin: 0; }
 .office-head {
-  position: absolute; top: 18px; left: 20px; max-width: 340px; padding: 14px 16px; border-radius: 12px;
+  position: absolute; top: 18px; left: 20px; max-width: 320px; padding: 14px 40px 14px 16px; border-radius: 12px;
   background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line);
   backdrop-filter: blur(8px); box-shadow: var(--shadow);
 }
@@ -387,16 +397,19 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 .office-head p { margin: 4px 0 10px; color: var(--muted); font-size: 12.5px; }
 .legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
 .legend li { display: flex; align-items: center; gap: 6px; }
-.lg { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.lg.working { background: #38bdf8; box-shadow: 0 0 0 3px color-mix(in srgb, #38bdf8 25%, transparent); border-radius: 50%; }
-.lg.review { background: #f59e0b; transform: rotate(45deg) scale(.85); }
-.lg.failed { background: #ef4444; transform: rotate(45deg) scale(.85); }
+/* the emoji heads: the colour is the state */
+.lg { width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font-style: normal; font-size: 11px; line-height: 1; }
+.lg.free { background: #22c55e; }
+.lg.busy { background: #ef4444; }
+.lg.review { background: #f59e0b; }
+.lg.failed { background: #8b5cf6; }
+.ol-place { font-size: 12px; opacity: 0.9; }
 
 .office-tools { position: absolute; top: 18px; right: 20px; display: flex; gap: 6px; }
 .office-tools .icon-btn { font-size: 16px; line-height: 1; }
 
 .office-feed {
-  position: absolute; left: 20px; bottom: 20px; width: min(420px, calc(100% - 40px)); padding: 12px 14px 8px;
+  position: absolute; left: 20px; bottom: 20px; width: min(380px, calc(100% - 40px)); padding: 12px 40px 8px 14px;
   border-radius: 12px; background: color-mix(in srgb, var(--panel) 90%, transparent);
   border: 1px solid var(--line); backdrop-filter: blur(8px); box-shadow: var(--shadow);
 }

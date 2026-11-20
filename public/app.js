@@ -354,12 +354,14 @@ function renderOffice() {
     officeEl.innerHTML = `
       <div class="office-stage" id="officeStage"></div>
       <div class="office-head">
+        <button class="icon-btn panel-toggle" data-panel="head" aria-label="Hide or show the legend" title="Hide or show">–</button>
         <h1>The office</h1>
-        <p>Your crews at their desks. Click someone to give them work or see what they are doing; click a floor to open that project.</p>
+        <p>Click someone to give them work or see what they are doing; click a floor to open that project. Free people from every project meet in the café &amp; lounge: coffee, plants, ping-pong and foosball.</p>
         <ul class="legend">
-          <li><i class="lg working"></i>Working</li>
-          <li><i class="lg review"></i>Waiting for your review</li>
-          <li><i class="lg failed"></i>Needs attention</li>
+          <li><i class="lg free">🙂</i>Free</li>
+          <li><i class="lg busy">😤</i>Busy</li>
+          <li><i class="lg review">🤔</i>Waiting for your review</li>
+          <li><i class="lg failed">😵</i>Needs attention</li>
         </ul>
       </div>
       <div class="office-tools">
@@ -367,7 +369,22 @@ function renderOffice() {
         <button class="icon-btn" data-office="out" aria-label="Zoom out">−</button>
         <button class="btn sm" data-office="fit">Fit</button>
       </div>
-      <section class="office-feed" aria-label="Live activity"><h2>Live</h2><ol id="officeFeed"></ol></section>`;
+      <section class="office-feed" aria-label="Live activity"><button class="icon-btn panel-toggle" data-panel="feed" aria-label="Hide or show live activity" title="Hide or show">–</button><h2>Live</h2><ol id="officeFeed"></ol></section>`;
+    // The legend and the live feed fold away so they do not cover the office; remembered per browser.
+    for (const k of ['head', 'feed']) {
+      let folded = false;
+      try { folded = localStorage.getItem(`devcrew-fold-${k}`) === '1'; } catch { /* private mode */ }
+      officeEl.querySelector(k === 'head' ? '.office-head' : '.office-feed').classList.toggle('folded', folded);
+    }
+    officeEl.addEventListener('click', e => {
+      const b = e.target.closest('[data-panel]');
+      if (!b) return;
+      const panel = b.closest('.office-head, .office-feed');
+      const folded = panel.classList.toggle('folded');
+      b.textContent = folded ? '+' : '–';
+      try { localStorage.setItem(`devcrew-fold-${b.dataset.panel}`, folded ? '1' : '0'); } catch { /* private mode */ }
+    });
+    for (const b of officeEl.querySelectorAll('[data-panel]')) b.textContent = b.closest('.folded') ? '+' : '–';
   }
   if (!main.contains(officeEl)) main.replaceChildren(officeEl);
   if (!office) {
