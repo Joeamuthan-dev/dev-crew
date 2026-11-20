@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState, DEFAULT_LIMITS, MIN_SAMPLES } from '../lib/limits.mjs';
+import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState, taskSize, taskWords, similarity, DEFAULT_LIMITS, MIN_SAMPLES, MIN_SIMILAR } from '../lib/limits.mjs';
 
 const MIN = 60000;
 
@@ -45,6 +45,40 @@ test('estimate widens to the role, then the mode', () => {
 test('estimate ignores failed runs and other models', () => {
   const hist = [...Array.from({ length: 10 }, () => run({ ok: false })), ...Array.from({ length: 10 }, () => run({ model: 'opus' }))];
   assert.equal(estimate(hist, { projectId: 'p', role: 'backend', mode: 'change', model: 'sonnet' }).basis, 'default');
+});
+
+test('taskSize reads wording cues', () => {
+  assert.equal(taskSize('Fix typo in README').size, 'small');
+  assert.equal(taskSize('Add pagination to GET /invoices').size, 'normal');
+  assert.equal(taskSize('Refactor the auth module').size, 'large');
+  assert.equal(taskSize('Migrate all controllers to the new framework').size, 'xlarge');
+  assert.equal(taskSize('').factor, 1);
+});
+
+test('estimate scales the default by the size of the typed task', () => {
+  const q = text => estimate([], { projectId: 'p', role: 'backend', mode: 'change', model: 'sonnet', text });
+  const small = q('Fix a typo in the docs');
+  const normal = q('Add pagination to GET /invoices');
+  const big = q('Refactor and migrate all services across the solution');
+  assert.equal(normal.size, 'normal');
+  assert.ok(small.wallMs.p50 < normal.wallMs.p50 && normal.wallMs.p50 < big.wallMs.p50);
+  assert.ok(small.costUsd.p75 < normal.costUsd.p75 && normal.costUsd.p75 < big.costUsd.p75);
+});
+
+test('estimate prefers similar past tasks', () => {
+  const hist = [
+    ...Array.from({ length: MIN_SIMILAR }, () => run({ text: 'Add pagination to the invoices endpoint', wallMs: 2 * MIN })),
+    ...Array.from({ length: 10 }, () => run({ text: 'Write integration tests for extraction jobs', wallMs: 20 * MIN })),
+  ];
+  const e = estimate(hist, { projectId: 'p', role: 'backend', mode: 'change', model: 'sonnet', text: 'Add pagination to invoices endpoint' });
+  assert.equal(e.basis, 'similar');
+  assert.equal(e.samples, MIN_SIMILAR);
+  assert.equal(e.wallMs.p50, 2 * MIN);
+});
+
+test('similarity of task wording', () => {
+  assert.ok(similarity(taskWords('Add pagination to invoices'), taskWords('pagination for invoices endpoint')) >= 0.25);
+  assert.equal(similarity(taskWords('Fix login bug'), taskWords('Update Dockerfile')), 0);
 });
 
 test('queueEta fills free slots in order', () => {

@@ -822,7 +822,19 @@ function refreshDrawer(first) {
   const canFollow = !active && !t.cleaned;
   const foot = $('#dFoot');
   const draft = foot.querySelector('textarea') ? foot.querySelector('textarea').value : '';
+  // After a limit stopped the run, offer to resume the same session with raised limits. The one
+  // that was hit is suggested at double; the other keeps its value.
+  const al = t.appliedLimits || {};
+  const keepBudget = foot.querySelector('#contBudget') ? foot.querySelector('#contBudget').value : '';
+  const keepTime = foot.querySelector('#contTime') ? foot.querySelector('#contTime').value : '';
+  const contRow = canFollow && t.status === 'stopped' ? `
+    <div class="continue-limits">
+      <span>Continue picks up where it stopped: same session, same branch, nothing redone. Limits for the next run:</span>
+      <label>$ <input type="number" id="contBudget" min="0" step="0.5" value="${esc(keepBudget || (t.stopReason === 'budget' ? (al.taskBudgetUsd || 2) * 2 : al.taskBudgetUsd ?? ''))}"></label>
+      <label><input type="number" id="contTime" min="0" step="5" value="${esc(keepTime || (t.stopReason === 'timeout' ? (al.taskTimeoutMin || 30) * 2 : al.taskTimeoutMin ?? ''))}"> min</label>
+    </div>` : '';
   foot.innerHTML = `
+    ${contRow}
     ${canFollow ? `<textarea id="followText" rows="2" placeholder="Follow up with the ${esc(r.name)}: ask a question, request changes, or say “continue”…"></textarea>` : ''}
     <div class="acts">
       <div class="card-actions">
@@ -861,8 +873,14 @@ async function taskAction(act) {
       $('#followText').value = '';
       toast('Sent — the agent picks it up next');
     } else if (act === 'continue') {
-      await api(`/api/tasks/${id}/followup`, { method: 'POST', body: { text: 'Continue where you stopped. You hit a run limit; finish the task and give the usual report.' } });
-      toast('Continuing: the agent picks it up next');
+      const extra = (($('#followText') || {}).value || '').trim();
+      await api(`/api/tasks/${id}/followup`, { method: 'POST', body: {
+        text: `Continue where you stopped: the last run hit a limit. Do not start over; pick up from your last step, finish the task and give the usual report.${extra ? `\n\nAlso from the owner: ${extra}` : ''}`,
+        budgetUsd: ($('#contBudget') || {}).value,
+        timeoutMin: ($('#contTime') || {}).value,
+      } });
+      if ($('#followText')) $('#followText').value = '';
+      toast('Continuing from where it stopped');
     } else if (act === 'cancel') {
       await api(`/api/tasks/${id}/cancel`, { method: 'POST' });
     } else if (act === 'cleanup') {
@@ -909,7 +927,10 @@ function openAssign(pre = {}) {
         <textarea name="details" rows="4" placeholder="Acceptance criteria, ticket text, links, constraints…">${esc(pre.details || '')}</textarea></div>
       <div class="field"><label>Model</label>
         <select name="model"><option value="">Default (${esc(S.settings.model)})</option><option value="sonnet">Sonnet</option><option value="opus">Opus — hardest tasks</option><option value="haiku">Haiku — quick, cheap</option></select></div>
-      <div class="estimate" id="estBox" aria-live="polite">Estimating…</div>
+      <div class="estimate">
+        <div class="est-head"><button type="button" class="btn sm" id="estBtn">Estimate ETA</button><span class="faint" id="estHint">Type the task, then check how long it should take.</span></div>
+        <div id="estBox" aria-live="polite"></div>
+      </div>
       <div class="grid2">
         <div class="field"><label>Cost limit per run <span style="font-weight:400;color:var(--faint)">(USD, 0 = none)</span></label>
           <input type="number" name="budgetUsd" min="0" step="0.5" inputmode="decimal"></div>
@@ -947,11 +968,26 @@ function openAssign(pre = {}) {
         || '<option value="">Current branch</option>';
     } catch { /* keep the default */ }
   };
-  // Estimate and default limits for the current project / role / mode / model. The limit fields
-  // are refilled with the defaults until the owner edits them.
+  // Default limits follow the project / role until the owner edits them. The estimate is on
+  // demand: Estimate ETA sends the typed task, and the answer is marked stale once anything that
+  // feeds it changes.
   let limitsTouched = false;
   let estSeq = 0;
   let lastEst = null;
+  const fillLimits = async () => {
+    if (limitsTouched) return;
+    const q = new URLSearchParams({ project: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value });
+    try {
+      const e = await api(`/api/estimate?${q}`);
+      if (!limitsTouched) { F.budgetUsd.value = e.limits.taskBudgetUsd; F.timeoutMin.value = e.limits.taskTimeoutMin; }
+    } catch { /* leave the fields blank: the server applies the defaults */ }
+  };
+  const markStale = () => {
+    if (!lastEst) return;
+    lastEst = null;
+    $('#estBox').classList.add('stale');
+    $('#estHint').textContent = 'The task changed since this estimate. Press Estimate ETA again.';
+  };
   // Warn when a typical run of this kind would not fit inside the limits as set.
   const checkLimitFit = e => {
     const el = $('#estWarn');
@@ -963,36 +999,55 @@ function openAssign(pre = {}) {
     if (mins && e.estimate.wallMs.p75 > mins * 60000) warn.push(`may hit the ${mins}-minute time limit`);
     el.innerHTML = warn.length ? `<b class="warn">Runs like this ${warn.join(' and ')}. Raise the limit or pick a cheaper model.</b>` : '';
   };
-  const fillEstimate = async () => {
+  const SIZE_WORDS = { small: 'looks like a small task', large: 'looks like a larger task', xlarge: 'looks like a big task' };
+  const runEstimate = async () => {
+    if (!F.title.value.trim()) { F.title.focus(); return toast('Type the task first', true); }
     const seq = ++estSeq;
-    const q = new URLSearchParams({ project: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value });
+    const btn = $('#estBtn');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
     try {
-      const e = await api(`/api/estimate?${q}`);
+      const e = await api('/api/estimate', { method: 'POST', body: {
+        projectId: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value,
+        title: F.title.value, details: F.details.value,
+      } });
       if (seq !== estSeq) return;
-      if (!limitsTouched) { F.budgetUsd.value = e.limits.taskBudgetUsd; F.timeoutMin.value = e.limits.taskTimeoutMin; }
-      const basis = e.estimate.basis === 'default'
-        ? '<span class="faint">rough estimate: no past runs of this kind yet</span>'
-        : `<span class="faint">from ${e.estimate.samples} past ${e.estimate.basis === 'project-role' ? 'runs by this role on this project' : e.estimate.basis === 'role' ? 'runs by this role' : 'runs of this kind'}</span>`;
+      const est = e.estimate;
+      const basis = est.basis === 'similar'
+        ? `based on ${est.samples} similar past tasks`
+        : est.basis === 'default'
+          ? `rough: no past runs of this kind yet${SIZE_WORDS[est.size] ? `, and it ${SIZE_WORDS[est.size]}` : ''}`
+          : `from ${est.samples} past ${est.basis === 'project-role' ? 'runs by this role on this project' : est.basis === 'role' ? 'runs by this role' : 'runs of this kind'}${SIZE_WORDS[est.size] ? `; it ${SIZE_WORDS[est.size]}` : ''}`;
       const when = e.spend.paused
         ? '<b class="warn">Waits: today\'s spend limit is reached</b>'
         : e.eta ? (e.eta.start - Date.now() < 60000 ? 'Starts now' : `Starts in ~${dur(e.eta.start - Date.now())}`) + ` · done by ~${new Date(e.eta.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
-      $('#estBox').innerHTML = `<div><b>Usually ${estRange(e.estimate)}</b> · ${esc(e.model)}</div><div>${when}</div><div>${basis}</div><div id="estWarn"></div>`;
-      checkLimitFit(e);
+      const box = $('#estBox');
+      box.classList.remove('stale');
+      box.innerHTML = `<div><b>≈ ${estRange(est)}</b> · ${esc(e.model)}</div><div>${when}</div><div class="faint">${esc(basis)}</div><div id="estWarn"></div>`;
+      $('#estHint').textContent = 'Approximate. Real runs vary.';
       lastEst = e;
+      checkLimitFit(e);
     } catch (err) {
       if (seq === estSeq) $('#estBox').textContent = `No estimate: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Estimate ETA';
     }
   };
+  $('#estBtn').addEventListener('click', runEstimate);
+  F.title.addEventListener('input', markStale);
+  F.details.addEventListener('input', markStale);
   F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
   F.timeoutMin.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
-  F.model.addEventListener('change', fillEstimate);
-  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); fillEstimate(); });
+  F.model.addEventListener('change', () => { markStale(); fillLimits(); });
+  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); markStale(); fillLimits(); });
   F.repo.addEventListener('change', fillBranches);
-  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); fillEstimate(); }));
+  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); markStale(); fillLimits(); }));
   form.querySelectorAll('input[name=role]').forEach(i => i.addEventListener('change', () => {
     if (!modeTouched) form.querySelector(`input[name=mode][value=${roleOf(F.role.value).defaultMode}]`).checked = true;
     fillRepos();
-    fillEstimate();
+    markStale();
+    fillLimits();
   }));
   form.addEventListener('submit', async e => {
     if (e.submitter && e.submitter.value === 'cancel') return;
@@ -1003,7 +1058,7 @@ function openAssign(pre = {}) {
     try {
       await api('/api/tasks', { method: 'POST', body });
       toast(`Assigned to ${roleOf(body.role).name}`);
-      if (F.more.checked) { F.title.value = ''; F.details.value = ''; F.title.focus(); }
+      if (F.more.checked) { F.title.value = ''; F.details.value = ''; markStale(); F.title.focus(); }
       else dlg.close();
     } catch (err) {
       toast(err.message, true);
@@ -1012,7 +1067,7 @@ function openAssign(pre = {}) {
     }
   });
   fillRepos();
-  fillEstimate();
+  fillLimits();
   dlg.showModal();
   F.title.focus();
 }

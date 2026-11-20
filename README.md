@@ -193,10 +193,13 @@ tens of cents.
 
 ### Estimates and limits
 
-Before you assign a task, the dialog shows how long and how much it usually takes (the middle
-half of past runs by that role, on that project, with that model), when it would start given the
-queue, and when it should be done. With fewer than five past runs it shows a rough default and
-says so. Queued and running tasks show their ETA in the task lists.
+Type the task in the Assign dialog and press **Estimate ETA** for an approximate time and cost
+for that task, when it would start given the queue, and when it should be done. The estimate uses,
+in order: past tasks with similar wording (three or more), past runs by that role on that project
+(five or more), then by that role, then of that kind. Without history it uses a rough default,
+scaled by what the wording suggests ("fix typo" is small; "refactor all services" is big), and
+says so. Editing the task greys the estimate out until you check again. Queued and running tasks
+show their ETA in the task lists.
 
 Every run stays inside limits. Set defaults in `settings.limits`, and override them per project
 (`projects[].limits`), per role (`projects[].roles.<role>.limits`) or per task in the dialog:
@@ -211,8 +214,9 @@ Every run stays inside limits. Set defaults in `settings.limits`, and override t
 | `taskTimeoutMin` | The server stops the run, with a warning in the log at `warnAt` (80%). |
 | `dailyBudgetUsd` | Once today's spend reaches it, queued runs wait until tomorrow or until you raise it. The top bar turns amber at 80% and red when reached. |
 
-`0` means no limit. A run stopped by a limit is marked **Stopped**, not failed: press
-**Continue** to resume the same session with a fresh allowance.
+`0` means no limit. A run stopped by a limit is marked **Stopped**, not failed. **Continue**
+resumes the same Claude session on the same branch, so it picks up from its last step instead of
+starting again; the task panel lets you raise the limit that was hit (it suggests double) first.
 
 ## Files
 

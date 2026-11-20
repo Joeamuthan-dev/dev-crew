@@ -88,16 +88,19 @@ const jobModel = j => j.kind === 'report'
   ? cfg.settings.reportModel || cfg.settings.model
   : j.model || ((project(j.projectId) || { roles: {} }).roles[j.role] || {}).model || cfg.settings.model;
 
-/** Every finished run, with the task's project, role and mode, to learn estimates from. */
+const taskText = t => `${t.title || ''}\n${t.details || ''}`;
+
+/** Every finished run, with the task's project, role, mode and wording, to learn estimates from. */
 function runHistory() {
   const out = [];
-  for (const t of S.tasks) for (const r of t.runs || []) out.push({ projectId: t.projectId, role: t.role, mode: t.mode, model: r.model, ok: r.ok, wallMs: r.wallMs, costUsd: r.costUsd, turns: r.turns });
+  // Only a task's first run describes the task as typed; follow-ups are a different amount of work.
+  for (const t of S.tasks) for (const r of t.runs || []) out.push({ projectId: t.projectId, role: t.role, mode: t.mode, model: r.model, ok: r.ok, wallMs: r.wallMs, costUsd: r.costUsd, turns: r.turns, text: r.kind === 'task' ? taskText(t) : '' });
   for (const rp of S.reports) for (const r of rp.runs || []) out.push({ projectId: rp.projectId, role: 'report', mode: 'report', model: r.model, ok: r.ok, wallMs: r.wallMs, costUsd: r.costUsd, turns: r.turns });
   return out;
 }
 
-function estimateFor({ projectId, role, mode, model }) {
-  return estimate(runHistory(), { projectId, role, mode, model });
+function estimateFor({ projectId, role, mode, model, text = '' }) {
+  return estimate(runHistory(), { projectId, role, mode, model, text });
 }
 
 function limitsFor(job) {
@@ -121,7 +124,8 @@ function spendView() {
 }
 
 function etas() {
-  const est = j => estimateFor({ projectId: j.projectId, role: j.role, mode: j.mode || 'report', model: jobModel(j) }).wallMs.p50;
+  // A task keeps the estimate made from its wording when it was assigned; reports use history.
+  const est = j => (j.kind === 'task' && j.estimate ? j.estimate : estimateFor({ projectId: j.projectId, role: j.role, mode: j.mode || 'report', model: jobModel(j), text: j.kind === 'task' ? taskText(j) : '' })).wallMs.p50;
   const jobs = [...S.tasks.map(t => ({ ...t, kind: 'task' })), ...S.reports.map(r => ({ ...r, kind: 'report', mode: 'report' }))];
   return queueEta({
     now: Date.now(),
@@ -483,7 +487,7 @@ async function createTask(b) {
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
   };
   // Kept so the cost page can later compare what we expected with what happened.
-  t.estimate = estimateFor({ projectId: p.id, role: t.role, mode, model: jobModel(t) });
+  t.estimate = estimateFor({ projectId: p.id, role: t.role, mode, model: jobModel(t), text: taskText(t) });
   S.tasks.unshift(t);
   touchTask(t);
   pump();
@@ -506,17 +510,21 @@ async function route(req, res, url) {
 
   if (m === 'GET' && parts[1] === 'log' && parts[2]) return send(res, 200, store.readLog(parts[2]));
 
-  if (m === 'GET' && url.pathname === '/api/estimate') {
+  // GET ?project&role&mode&model gives the default limits and a role-level estimate; POST with the
+  // typed title and details (the dialog's Estimate ETA button) estimates that particular task.
+  if ((m === 'GET' || m === 'POST') && url.pathname === '/api/estimate') {
     const q = url.searchParams;
-    const p = project(q.get('project'));
+    const b = m === 'POST' ? await readBody(req) : {};
+    const p = project(b.projectId || q.get('project'));
     if (!p) return send(res, 404, { error: 'Unknown project.' });
-    const role = q.get('role');
-    const mode = q.get('mode') === 'analyze' ? 'analyze' : 'change';
-    const model = q.get('model') || (p.roles[role] || {}).model || cfg.settings.model;
-    const est = estimateFor({ projectId: p.id, role, mode, model });
+    const role = b.role || q.get('role');
+    const mode = (b.mode || q.get('mode')) === 'analyze' ? 'analyze' : 'change';
+    const model = b.model || q.get('model') || (p.roles[role] || {}).model || cfg.settings.model;
+    const text = `${String(b.title || '').slice(0, 200)}\n${String(b.details || '').slice(0, 8000)}`.trim();
+    const est = estimateFor({ projectId: p.id, role, mode, model, text });
     const limits = resolveLimits(cfg.settings.limits, p.limits, (p.roles[role] || {}).limits);
     // When would a task assigned now start and finish? Simulate it at the back of the queue.
-    const probe = { id: '__probe', projectId: p.id, role, mode, model, status: 'queued', queuedAt: Date.now() };
+    const probe = { id: '__probe', projectId: p.id, role, mode, model, status: 'queued', queuedAt: Date.now(), estimate: est };
     S.tasks.push(probe);
     let eta;
     try { eta = etas().__probe || null; } finally { S.tasks.pop(); }
@@ -562,10 +570,17 @@ async function route(req, res, url) {
     if (!t) return send(res, 404, { error: 'No such task.' });
     const action = parts[3];
     if (m === 'POST' && action === 'followup') {
-      const { text } = await readBody(req);
+      const { text, budgetUsd, timeoutMin } = await readBody(req);
       if (!String(text || '').trim()) return send(res, 400, { error: 'Write the follow-up first.' });
       if (t.status === 'running' || t.status === 'queued') return send(res, 409, { error: 'The agent is still on this task. Wait for it to finish.' });
       if (t.cleaned) return send(res, 409, { error: 'This task\'s worktree was cleaned up. Assign a new task instead.' });
+      // Continuing after a limit: new limits apply to this and later runs of the task. The run
+      // resumes the same Claude session on the same branch, so no work is lost or redone.
+      const raised = cleanLimits({ taskBudgetUsd: budgetUsd, taskTimeoutMin: timeoutMin });
+      if (Object.keys(raised).length) {
+        t.limits = { ...(t.limits || {}), ...raised };
+        log(t.id, 'sys', `Limits for this task are now ${[raised.taskBudgetUsd !== undefined ? `$${raised.taskBudgetUsd} per run` : '', raised.taskTimeoutMin !== undefined ? `${raised.taskTimeoutMin} min per run` : ''].filter(Boolean).join(' and ')}.`);
+      }
       t.pendingFollowup = String(text).trim().slice(0, 8000);
       t.status = 'queued';
       t.queuedAt = Date.now();
