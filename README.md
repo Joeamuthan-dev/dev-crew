@@ -23,7 +23,13 @@ machine with your own Claude login. Nothing is hosted anywhere.
   pnpm, yarn, dotnet, maven, gradle, pytest, go, cargo, terraform fmt/validate, and so on).
   Anything else is refused automatically and shown in the task log. `git push`,
   `terraform apply`, `kubectl`, `rm -rf` and similar are always denied.
-- The server only listens on `127.0.0.1`.
+- The server only listens on `127.0.0.1`, and only the dashboard can drive it: requests must be
+  made to `localhost`, come from the dashboard's own origin, carry an `X-Dev-Crew` header to
+  change anything, and send JSON. Other web pages you visit cannot queue tasks.
+- If you start Dev Crew from inside a Claude session (the Claude desktop app or a Claude Code
+  terminal), that session's `CLAUDE_*` / `ANTHROPIC_*` variables are not passed to the agents, so
+  they use your own `claude` login. `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CONFIG_DIR` are kept. Set `"inheritClaudeEnv": true` in `settings` to pass everything.
 
 ## Set up on your work laptop
 

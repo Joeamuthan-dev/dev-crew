@@ -21,20 +21,26 @@ Phase 0 goes first because later phases depend on it. After that, the order is a
 
 ---
 
-## 0. Foundations (do first)
+## 0. Foundations (do first) — done on `feature/foundations`
 
 These come from the code review and make the later phases safe and measurable.
 
-- **Reject requests from other websites.** `server.mjs` accepts any POST and parses the body as
+- **Reject requests from other websites.** `server.mjs` accepted any POST and parsed the body as
   JSON whatever its content type, so a web page could probably queue a task on
-  `localhost:4610`. Fix: check the `Origin` header, require `content-type: application/json`,
-  and send a per-session token with each request.
-- **Control the environment agents get.** `runClaude` passes all of `process.env` to agents.
-  Remove the `CLAUDE_*` and `ANTHROPIC_*` variables inherited from the Claude desktop app, so a
-  plain `npm start` works and `data/start-devcrew.ps1` is no longer needed.
-- **Record full run data.** Today a run only keeps `costUsd` and `turns`. The `result` stream
-  event also has duration and token usage (input, output, cache read and cache write tokens)
-  and the model. Store all of it on each task and report, because phases 1, 7 and 9 need it.
+  `localhost:4610`. Done in `lib/guard.mjs`: the Host must be localhost (stops DNS rebinding),
+  any Origin must be the dashboard's own, state changes need an `X-Dev-Crew` header (a custom
+  header forces a CORS preflight, which the server never approves, so it does the job a
+  per-session token would), and request bodies must be JSON.
+- **Control the environment agents get.** `runClaude` passed all of `process.env` to agents.
+  Done: when Dev Crew runs inside a Claude session, `agentEnv()` drops that session's
+  `CLAUDE_*` / `ANTHROPIC_*` variables (keeping `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CONFIG_DIR`). `settings.inheritClaudeEnv: true` turns this off. A plain `npm start`
+  works, so `data/start-devcrew.ps1` is no longer needed.
+- **Record full run data.** A run only kept `costUsd` and `turns`. Done: every task and report
+  now keeps a `runs` list (time, kind, model, ok, cost, turns, wall and API time, input / output
+  / cache tokens) plus running totals in `tokens` and `wallMs`.
+- **Tests:** `npm test` runs `node:test` unit tests for the guard, the environment filter and the
+  run statistics.
 
 ## 1. Run limits and ETA before starting
 
