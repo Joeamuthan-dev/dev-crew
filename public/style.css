@@ -535,6 +535,32 @@ ol.plan .step-key { font-size: 11px; }
 .person-row input:not([type=checkbox]) { min-width: 0; }
 @media (max-width: 760px) { .person-row { grid-template-columns: 1fr 1fr; } }
 
+/* settings */
+.settings { display: grid; gap: 14px; max-width: 980px; }
+.set-sec { padding: 16px 18px; }
+.set-sec h2 { font-size: 15px; margin: 0 0 10px; }
+.set-sec h4 { margin: 12px 0 6px; font-size: 12.5px; color: var(--muted); }
+.set-sec summary { cursor: pointer; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
+.seg span { display: block; padding: 6px 12px; font-size: 13px; border-right: 1px solid var(--line); }
+.seg label:last-child span { border-right: 0; }
+.seg input:checked + span { background: var(--accent); color: #fff; }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+.set-rows { display: grid; gap: 12px; }
+.set-rows > div { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.set-label { width: 90px; font-size: 13px; color: var(--muted); }
+.perm-list { display: flex; flex-wrap: wrap; gap: 4px; }
+code.perm { font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); }
+.set-save { position: sticky; bottom: 0; padding: 12px 0; display: flex; align-items: center; gap: 12px; background: linear-gradient(transparent, var(--bg) 30%); }
+.set-save .hint { color: var(--red); }
+:root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation: none !important; transition: none !important; }
+:root[data-motion="reduced"] * { animation-duration: 0.01ms !important; }
+
 /* housekeeping */
 .hk-btn { width: 100%; justify-content: flex-start; margin-bottom: 6px; }
 .hk-summary { padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); margin-bottom: 8px; }

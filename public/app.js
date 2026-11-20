@@ -26,8 +26,25 @@ async function api(url, { method = 'GET', body } = {}) {
 
 async function load() {
   S = await api('/api/state');
+  applyUi();
   render();
   if (drawer) refreshDrawer();
+}
+
+/** Appearance from the Settings page: theme, motion and 3D quality (the 3D office reads them). */
+let officeQuality = null;
+function applyUi() {
+  const ui = (S && S.settings.ui) || { theme: 'system', motion: 'full', quality: 'high', officeView: '3d' };
+  globalThis.devcrewUi = ui;
+  setTheme(ui.theme === 'system' ? '' : ui.theme);
+  document.documentElement.dataset.motion = ui.motion;
+  // A different 3D quality needs a new renderer: drop the office so the next visit rebuilds it.
+  if (officeQuality && officeQuality !== ui.quality && office && office.destroy) {
+    office.destroy();
+    office = null;
+    officeEl = null;
+  }
+  officeQuality = ui.quality;
 }
 
 function upsert(list, item) {
@@ -249,6 +266,7 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   if (parts[0] === 'p' && parts[1]) return { view: 'project', id: parts[1], tab: parts[2] || 'crew' };
   if (parts[0] === 'today') return { view: 'today' };
+  if (parts[0] === 'settings') return { view: 'settings' };
   return { view: 'office' };
 }
 
@@ -258,13 +276,17 @@ function render() {
   renderSidebar();
   const r = route();
   const main = $('#main');
-  if (r.view === 'office') return renderOffice();
+  const twoD = ((S.settings.ui || {}).officeView) === '2d';
+  if (r.view === 'office' && !twoD) return renderOffice();
   main.classList.remove('full');
   closeAgentCard();
   if (office && office.stop) office.stop();
   if (officeEl && main.contains(officeEl)) main.replaceChildren();
+  // The Settings page is drawn once per visit, so live updates never wipe a half-edited form.
+  if (r.view === 'settings') { if (!$('#settingsPage')) renderSettings(main); return; }
   const scroll = window.scrollY;
   if (r.view === 'project' && projOf(r.id)) main.innerHTML = projectView(projOf(r.id), r.tab);
+  else if (r.view === 'office') main.innerHTML = office2dView();
   else main.innerHTML = todayView();
   window.scrollTo(0, scroll);
 }
@@ -299,6 +321,7 @@ function renderSidebar() {
   $('#sidebar').innerHTML = `
     <a class="nav-item ${r.view === 'office' ? 'active' : ''}" href="#/office"><span class="grow">Office</span></a>
     <a class="nav-item ${r.view === 'today' ? 'active' : ''}" href="#/today"><span class="grow">Today</span></a>
+    <a class="nav-item ${r.view === 'settings' ? 'active' : ''}" href="#/settings"><span class="grow">Settings</span></a>
     <div class="nav-label">Projects</div>
     ${items || '<div class="empty">No projects yet.</div>'}
     <a class="nav-item add" href="#" data-add-project><span class="grow">+ Add project</span></a>
@@ -351,6 +374,7 @@ function renderOffice() {
     office = 'loading';
     import('./office3d.js').then(m => {
       office = m.createOffice($('#officeStage'), {
+        quality: (S.settings.ui || {}).quality || 'high',
         onAgent: (pid, role) => openAgentCard(pid, role),
         onZone: pid => { location.hash = `#/p/${pid}`; },
         onHub: () => { location.hash = '#/today'; },
@@ -799,6 +823,148 @@ function appendLog(lines, force) {
   const atBottom = force || box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   box.insertAdjacentHTML('beforeend', lines.map(l => `<div class="l ${l.kind}">${esc(l.text)}</div>`).join(''));
   if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------------- simple 2D office ---------------- */
+
+function office2dView() {
+  return `<div class="page-head"><div><h1>The office</h1><div class="sub">Simple view. Switch to the 3D office in <a href="#/settings">Settings</a>.</div></div></div>
+    ${S.projects.map(p => `<div class="section-title"><a href="#/p/${p.id}">${esc(p.name)}</a></div>${crewTab(p)}`).join('') || '<div class="empty">No projects yet.</div>'}`;
+}
+
+/* ---------------- settings page ---------------- */
+
+async function renderSettings(main) {
+  main.innerHTML = '<div id="settingsPage"><div class="empty">Loading settings…</div></div>';
+  let d;
+  try { d = await api('/api/settings'); } catch (e) {
+    $('#settingsPage').innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+    return;
+  }
+  if (!$('#settingsPage')) return; // navigated away meanwhile
+  const e = d.effective;
+  const l = e.limits;
+  const dr = e.dailyReport;
+  const hk = e.housekeeping;
+  const ui = e.ui;
+  const mon = (d.settings.monday || {});
+  const opt = (v, cur, label = v) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(label)}</option>`;
+  const models = cur => [['sonnet', 'Sonnet: balanced'], ['opus', 'Opus: hardest tasks, costs most'], ['haiku', 'Haiku: quick and cheap']]
+    .concat(['sonnet', 'opus', 'haiku'].includes(cur) ? [] : [[cur, cur]]).map(([v, t]) => opt(v, cur, t)).join('');
+  const seg = (name, cur, choices) => `<div class="seg">${choices.map(([v, t]) => `<label><input type="radio" name="${name}" value="${v}" ${v === cur ? 'checked' : ''}><span>${t}</span></label>`).join('')}</div>`;
+  const chips = list => list.map(c => `<code class="perm">${esc(c)}</code>`).join(' ');
+
+  $('#settingsPage').innerHTML = `
+    <div class="page-head"><div><h1>Settings</h1><div class="sub">Saved to <code>${esc(e.configFile)}</code>; the previous version is kept in <code>data/config-backups</code>. Changes apply straight away.</div></div></div>
+    <form id="settingsForm" class="settings">
+      <section class="card set-sec"><h2>Agents</h2>
+        <div class="grid3">
+          <div class="field"><label>Default model</label><select name="model">${models(e.model)}</select></div>
+          <div class="field"><label>Stand-up model</label><select name="reportModel">${models(e.reportModel)}</select></div>
+          <div class="field"><label>Agents at a time</label><input type="number" name="maxConcurrent" min="1" max="8" step="1" value="${e.maxConcurrent}"><span class="hint">More run in parallel, and spend faster.</span></div>
+        </div>
+      </section>
+
+      <section class="card set-sec"><h2>Limits</h2>
+        <p class="hint">Defaults for every run. Projects, roles and single tasks can override them. 0 means no limit.</p>
+        <div class="grid4">
+          <div class="field"><label>Cost per run (USD)</label><input type="number" name="taskBudgetUsd" min="0" step="0.5" value="${l.taskBudgetUsd}"></div>
+          <div class="field"><label>Time per run (minutes)</label><input type="number" name="taskTimeoutMin" min="0" step="5" value="${l.taskTimeoutMin}"></div>
+          <div class="field"><label>Daily spend (USD)</label><input type="number" name="dailyBudgetUsd" min="0" step="1" value="${l.dailyBudgetUsd}"></div>
+          <div class="field"><label>Warn at (%)</label><input type="number" name="warnAtPercent" min="50" max="95" step="5" value="${Math.round(l.warnAt * 100)}"></div>
+        </div>
+      </section>
+
+      <section class="card set-sec"><h2>Handoffs</h2>
+        <p class="hint">When a finished task says another role should act next. Projects can override this.</p>
+        ${seg('handoffs', e.handoffs, [['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']])}
+      </section>
+
+      <section class="card set-sec"><h2>Daily stand-up</h2>
+        <div class="grid3">
+          <label class="check"><input type="checkbox" name="drEnabled" ${dr.enabled ? 'checked' : ''}> Write a stand-up for every project each morning</label>
+          <div class="field"><label>Time</label><input type="time" name="drAt" value="${esc(dr.at)}"></div>
+          <label class="check"><input type="checkbox" name="drWeekdays" ${dr.weekdaysOnly ? 'checked' : ''}> Weekdays only</label>
+        </div>
+        <p class="hint">Each stand-up is a paid run (usually a few cents). It only happens while Dev Crew is running.</p>
+      </section>
+
+      <section class="card set-sec"><h2>Housekeeping</h2>
+        <div class="grid3">
+          <div class="field"><label>Remove finished worktrees after (days)</label><input type="number" name="worktreeDays" min="0" step="1" value="${hk.worktreeDays}"></div>
+          <div class="field"><label>Archive tasks after (days)</label><input type="number" name="taskDays" min="0" step="1" value="${hk.taskDays}"></div>
+          <label class="check"><input type="checkbox" name="hkAuto" ${hk.auto ? 'checked' : ''}> Clean up by itself once a week</label>
+        </div>
+        <p class="hint">Unmerged work, worktrees with uncommitted changes and anything a queued task needs are never touched. <a href="#" data-housekeeping>Open Housekeeping</a></p>
+      </section>
+
+      <section class="card set-sec"><h2>Appearance</h2>
+        <div class="set-rows">
+          <div><label class="set-label">Theme</label>${seg('theme', ui.theme, [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']])}</div>
+          <div><label class="set-label">Motion</label>${seg('motion', ui.motion, [['full', 'Full'], ['reduced', 'Reduced'], ['off', 'Off']])}<span class="hint">Reduced: agents stay at their desks. Off: nothing moves.</span></div>
+          <div><label class="set-label">3D quality</label>${seg('quality', ui.quality, [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']])}<span class="hint">Lower it on slow laptops or remote desktops.</span></div>
+          <div><label class="set-label">Office</label>${seg('officeView', ui.officeView, [['3d', '3D office'], ['2d', 'Simple 2D view']])}</div>
+        </div>
+      </section>
+
+      <section class="card set-sec"><h2>monday.com</h2>
+        ${d.mondayTokenFromEnv ? '<p class="hint">A token is set in the <code>MONDAY_API_TOKEN</code> environment variable; it is used instead of the one below.</p>' : ''}
+        <div class="grid3">
+          <div class="field"><label>API token ${mon.tokenSet ? `<span class="faint">(saved, ends ${esc(mon.tokenHint)})</span>` : ''}</label><input type="password" name="mondayToken" autocomplete="off" placeholder="${mon.tokenSet ? 'Leave blank to keep the saved token' : 'Paste a token to connect'}"></div>
+          <div class="field"><label>API version <span class="faint">(optional)</span></label><input type="text" name="mondayApiVersion" value="${esc(mon.apiVersion || '')}" placeholder="e.g. 2024-10"></div>
+          ${mon.tokenSet ? '<label class="check"><input type="checkbox" name="mondayClear"> Remove the saved token</label>' : '<span></span>'}
+        </div>
+        <p class="hint">The token is stored in <code>crew.config.local.json</code> and never shown again here. Board ids are set per project.</p>
+      </section>
+
+      <section class="card set-sec"><h2>Permissions <span class="faint">(read-only)</span></h2>
+        <p class="hint">What agents may run. Anything else is refused and shown in the task log.</p>
+        <h4>Make changes</h4><div class="perm-list">${chips(d.permissions.change)}</div>
+        <h4>Investigate &amp; report</h4><div class="perm-list">${chips(d.permissions.analyze)}</div>
+        <h4>Always refused</h4><div class="perm-list">${chips(d.permissions.denied)}</div>
+        ${d.permissions.projects.some(p => p.extra.length) ? `<h4>Extra, per project</h4>${d.permissions.projects.filter(p => p.extra.length).map(p => `<div><b>${esc(p.name)}</b>: ${chips(p.extra)}</div>`).join('')}` : ''}
+      </section>
+
+      <details class="card set-sec"><summary><h2 style="display:inline">Advanced</h2></summary>
+        <div class="grid3">
+          <div class="field"><label>Claude command</label><input type="text" name="claudeCommand" value="${esc(e.claudeCommand)}"><span class="hint">${d.claude.found ? `Found: ${esc(d.claude.version)}` : '<span style="color:var(--red)">Not found</span>'}</span></div>
+          <label class="check"><input type="checkbox" name="inheritClaudeEnv" ${e.inheritClaudeEnv ? 'checked' : ''}> Pass a parent Claude session's variables to agents</label>
+          <div class="field"><label>Workspace</label><input type="text" value="${esc(e.workspacePath)}" readonly><span class="hint">Port ${e.port}. Change these in the file, then restart.</span></div>
+        </div>
+      </details>
+
+      <div class="set-save"><button class="btn primary" id="settingsSave">Save settings</button><span class="hint" id="settingsMsg"></span></div>
+    </form>`;
+
+  const form = $('#settingsForm');
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const F = form.elements;
+    const radio = n => (form.querySelector(`input[name=${n}]:checked`) || {}).value;
+    const body = {
+      model: F.model.value, reportModel: F.reportModel.value, maxConcurrent: F.maxConcurrent.value,
+      limits: { taskBudgetUsd: F.taskBudgetUsd.value, taskTimeoutMin: F.taskTimeoutMin.value, dailyBudgetUsd: F.dailyBudgetUsd.value, warnAtPercent: F.warnAtPercent.value },
+      handoffs: radio('handoffs'),
+      dailyReport: { enabled: F.drEnabled.checked, at: F.drAt.value, weekdaysOnly: F.drWeekdays.checked },
+      housekeeping: { worktreeDays: F.worktreeDays.value, taskDays: F.taskDays.value, auto: F.hkAuto.checked },
+      ui: { theme: radio('theme'), motion: radio('motion'), quality: radio('quality'), officeView: radio('officeView') },
+      monday: { token: F.mondayToken.value, apiVersion: F.mondayApiVersion.value, clearToken: !!(F.mondayClear && F.mondayClear.checked) },
+      advanced: { claudeCommand: F.claudeCommand.value, inheritClaudeEnv: F.inheritClaudeEnv.checked },
+    };
+    const btn = $('#settingsSave');
+    btn.disabled = true;
+    try {
+      await api('/api/settings', { method: 'PUT', body });
+      toast('Settings saved');
+      $('#settingsPage').remove();
+      renderSettings($('#main')); // show what was stored (e.g. the token hint)
+    } catch (err) {
+      $('#settingsMsg').textContent = err.message;
+      toast('Not saved: see the message by the button', true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 /* ---------------- project editor (add / edit) ---------------- */
@@ -1558,16 +1724,20 @@ $('#standupAllBtn').addEventListener('click', async () => {
   } catch (err) { toast(err.message, true); }
 });
 
+// The theme lives in the config (Settings > Appearance); localStorage only avoids a flash of the
+// wrong theme before the state has loaded.
 function setTheme(t) {
   if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   try { localStorage.setItem('devcrew-theme', t || ''); } catch { /* private mode */ }
 }
 try { setTheme(localStorage.getItem('devcrew-theme') || ''); } catch { /* ignore */ }
-$('#themeBtn').addEventListener('click', () => {
+$('#themeBtn').addEventListener('click', async () => {
   const dark = document.documentElement.dataset.theme
     ? document.documentElement.dataset.theme === 'dark'
     : matchMedia('(prefers-color-scheme: dark)').matches;
-  setTheme(dark ? 'light' : 'dark');
+  const theme = dark ? 'light' : 'dark';
+  setTheme(theme);
+  try { await api('/api/settings', { method: 'PUT', body: { ui: { theme } } }); } catch (e) { toast(e.message, true); }
 });
 
 window.addEventListener('hashchange', () => { closeDrawer(); render(); window.scrollTo(0, 0); $('#sidebar').classList.remove('open'); });

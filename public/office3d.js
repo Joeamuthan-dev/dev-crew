@@ -21,7 +21,10 @@ const cssVar = name => getComputedStyle(document.documentElement).getPropertyVal
 const mix = (a, b, t) => new THREE.Color(a).lerp(new THREE.Color(b), t);
 const rand = (a, b) => a + Math.random() * (b - a);
 const angleLerp = (a, b, t) => { let d = ((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; return a + d * t; };
-const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// The Settings page's motion choice (globalThis.devcrewUi, set by app.js) or the system setting.
+const motionSetting = () => ((globalThis.devcrewUi || {}).motion) || 'full';
+const reducedMotion = () => motionSetting() !== 'full' || matchMedia('(prefers-reduced-motion: reduce)').matches;
+const motionOff = () => motionSetting() === 'off';
 
 /* ---------- the walkway ring around each zone's desks (zone-local x/z) ---------- */
 
@@ -115,16 +118,18 @@ function codeTexture() {
   return t;
 }
 
-export function createOffice(host, { onAgent, onZone, onHub }) {
+export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' }) {
+  // high: sharp and soft shadows; medium: standard resolution, plain shadows; low: no shadows or
+  // antialiasing, for slow laptops and remote desktops.
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: quality !== 'low' });
   } catch {
     return null;
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.setPixelRatio(quality === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1);
+  renderer.shadowMap.enabled = quality !== 'low';
+  renderer.shadowMap.type = quality === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.domElement.className = 'office-canvas';
   host.appendChild(renderer.domElement);
 
@@ -837,7 +842,8 @@ export function createOffice(host, { onAgent, onZone, onHub }) {
     if (!running) return;
     raf = requestAnimationFrame(frame);
     const dt = Math.min(0.1, clock.getDelta());
-    const t = clock.elapsedTime;
+    // Motion "off": everything holds still, including the hub and the scrolling screens.
+    const t = motionOff() ? 0 : clock.elapsedTime;
     const still = reducedMotion();
     code.offset.y = (t * 0.12) % 1;
     core.rotation.y = t * (hubBusy ? 1.6 : 0.35);
@@ -902,6 +908,14 @@ export function createOffice(host, { onAgent, onZone, onHub }) {
       frame();
     },
     stop() { running = false; cancelAnimationFrame(raf); },
+    // Tear down completely (e.g. to rebuild with another 3D quality).
+    destroy() {
+      running = false;
+      cancelAnimationFrame(raf);
+      renderer.dispose();
+      renderer.domElement.remove();
+      labels.remove();
+    },
   };
 }
 
