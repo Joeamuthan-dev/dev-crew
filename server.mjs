@@ -6,7 +6,8 @@ import path from 'node:path';
 import { ROOT, loadConfig, refreshRepos } from './lib/config.mjs';
 import { ROLES, roleById } from './lib/roles.mjs';
 import * as G from './lib/git.mjs';
-import { runClaude, claudeFeatures, describeEvent } from './lib/claude.mjs';
+import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
+import { settingsFromForm, maskSettings } from './lib/settings.mjs';
 import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseReport, summaryOf } from './lib/prompts.mjs';
 import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
@@ -531,6 +532,7 @@ async function stateView() {
       dailyReport: cfg.settings.dailyReport, workspacePath: cfg.settings.workspacePath, configFile: path.basename(cfg.file),
       limits: cfg.settings.limits,
       handoffs: cfg.settings.handoffs,
+      ui: cfg.settings.ui,
     },
     spend: spendView(),
     etas: etas(),
@@ -947,6 +949,43 @@ async function route(req, res, url) {
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true });
+  }
+
+  // The Settings page. Secrets are never sent to the browser (maskSettings).
+  if (m === 'GET' && url.pathname === '/api/settings') {
+    const show = rules => [...new Set(rules.map(r => r.replace(/^(Bash|PowerShell)\((.*):\*\)$/, '$2')))];
+    const change = toolPolicy('change');
+    const analyze = toolPolicy('analyze');
+    return send(res, 200, {
+      settings: maskSettings(readRaw().settings || {}),
+      effective: {
+        model: cfg.settings.model, reportModel: cfg.settings.reportModel, maxConcurrent: cfg.settings.maxConcurrent,
+        limits: cfg.settings.limits, handoffs: cfg.settings.handoffs, dailyReport: cfg.settings.dailyReport,
+        housekeeping: cfg.settings.housekeeping, ui: cfg.settings.ui, claudeCommand: cfg.settings.claudeCommand,
+        inheritClaudeEnv: cfg.settings.inheritClaudeEnv, workspacePath: cfg.settings.workspacePath, port: cfg.settings.port,
+        configFile: path.basename(cfg.file),
+      },
+      mondayTokenFromEnv: !!process.env.MONDAY_API_TOKEN,
+      claude: await claudeFeatures(cfg.settings.claudeCommand),
+      permissions: {
+        change: show(change.allowed), analyze: show(analyze.allowed), denied: show(change.disallowed),
+        projects: cfg.projects.map(p => ({ name: p.name, extra: p.allowCommands })),
+      },
+    });
+  }
+
+  if (m === 'PUT' && url.pathname === '/api/settings') {
+    const form = await readBody(req);
+    const raw = readRaw();
+    const { settings, errors } = settingsFromForm(form, raw.settings || {});
+    if (errors.length) return send(res, 400, { error: errors.join(' ') });
+    const before = cfg.settings.claudeCommand;
+    writeRaw({ ...raw, settings });
+    cfg = loadConfig();
+    if (cfg.settings.claudeCommand !== before) resetClaude();
+    pump(); // a higher "agents at a time" or daily limit can start waiting work now
+    emit('reload', {});
+    return send(res, 200, { ok: true, restartNeeded: false });
   }
 
   if (m === 'GET' && url.pathname === '/api/people') return send(res, 200, { people: readRaw().people || [] });

@@ -139,7 +139,12 @@ context (the local draft from the docs worked well on DataEz, so it was not need
 - **Unused roles:** roles a project doesn't use are hidden from the office and the dialogs, for
   example Frontend for DataEz.
 
-## 5. Settings page
+## 5. Settings page — done on `feature/settings`
+
+Built as planned, with `lib/settings.mjs` (form validation and merge, secret masking; unit
+tested). Accent colour and density were left for the dashboard redesign (phase 6), which will
+add its own appearance options. The 3D office now honours motion (reduced: agents stay seated;
+off: nothing moves) and quality (pixel ratio, shadows, antialiasing), and there is a 2D office.
 
 One page for app-wide controls. It's stored in `crew.config.local.json` under `settings`.
 

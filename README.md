@@ -232,6 +232,24 @@ member or guest on your monday.com account (matched by email, then by name).
 first start doesn't fire a stand-up; the schedule starts the next morning. If the laptop was
 off at 09:00, the stand-up runs as soon as Dev Crew starts that day.
 
+## Settings
+
+**Settings** in the sidebar holds the app-wide options, saved to `crew.config.local.json` (validated
+and backed up like project edits) and applied straight away, without a restart:
+
+- **Agents:** default model, stand-up model, how many agents run at once.
+- **Limits:** cost and time per run, daily spend, when to warn.
+- **Handoffs:** ask, start automatically, or off.
+- **Daily stand-up:** on or off, time, weekdays only.
+- **Housekeeping:** how long to keep worktrees and tasks, weekly clean-up.
+- **Appearance:** theme, motion (full, reduced or off), 3D quality (high, medium, low), and a
+  simple 2D office instead of the 3D one.
+- **monday.com:** the API token (stored, never shown again; blank keeps it) and API version.
+- **Permissions:** what agents may run and what is always refused (read-only).
+- **Advanced:** the Claude command, and passing a parent Claude session's variables through.
+
+The workspace folder and the port are shown but changed in the file (they need a restart).
+
 ## Keep it running
 
 The stand-ups only happen while the server runs. To start it automatically when you log in to
