@@ -11,6 +11,7 @@ import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseRe
 import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
 import { search as searchPeople, directory, contactsFor } from './lib/people.mjs';
+import { checkRequest } from './lib/guard.mjs';
 
 const DATA = path.join(ROOT, 'data');
 const WT_DIR = path.join(DATA, 'worktrees');
@@ -82,6 +83,23 @@ function pump() {
   }
 }
 
+/**
+ * Keep one entry per Claude run on a task or report (a follow-up is a new run), plus running
+ * totals. This is what run-time estimates and the cost analytics page are built from.
+ */
+function recordRun(job, res, model, kind) {
+  const s = res.stats || {};
+  const tokens = s.tokens || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  (job.runs = job.runs || []).push({
+    at: Date.now(), kind, model: (s.models && s.models[0]) || model || '', ok: !!res.ok,
+    costUsd: res.costUsd, turns: res.turns, wallMs: s.wallMs || 0, apiMs: s.apiMs || 0, tokens,
+  });
+  const tot = job.tokens || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const k of Object.keys(tot)) tot[k] += tokens[k] || 0;
+  job.tokens = tot;
+  job.wallMs = (job.wallMs || 0) + (s.wallMs || 0);
+}
+
 function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'task';
 }
@@ -127,6 +145,7 @@ async function execTask(t, handle) {
     const prompt = resume ? followup : taskPrompt(t) + (followup ? `\n\nAlso from the owner: ${followup}` : '');
     if (followup) log(t.id, 'you', followup);
 
+    const model = t.model || (p.roles[t.role] || {}).model || cfg.settings.model;
     const run = runClaude({
       command: cfg.settings.claudeCommand,
       cwd,
@@ -134,11 +153,12 @@ async function execTask(t, handle) {
       systemPrompt: taskSystemPrompt(p, t.role, t.mode, { cwd, branch: t.branch, base: t.base }),
       mode: t.mode,
       extraCommands: p.allowCommands,
-      model: t.model || (p.roles[t.role] || {}).model || cfg.settings.model,
+      model,
       resume,
       addDirs,
       permissionMode: cfg.settings.permissionMode,
       strictMcp: cfg.settings.strictMcp,
+      inheritEnv: cfg.settings.inheritClaudeEnv,
       tmpDir: TMP,
       onEvent: ev => {
         if (ev.type === 'system' && ev.session_id && ev.session_id !== t.sessionId) { t.sessionId = ev.session_id; store.save(); }
@@ -152,6 +172,7 @@ async function execTask(t, handle) {
     if (res.sessionId) t.sessionId = res.sessionId;
     t.costUsd = (t.costUsd || 0) + res.costUsd;
     t.turns = (t.turns || 0) + res.turns;
+    recordRun(t, res, model, followup ? 'followup' : 'task');
     if (res.denials.length) {
       const what = res.denials.map(d => d.tool_name + (d.tool_input && d.tool_input.command ? `: ${d.tool_input.command}` : '')).join(' · ');
       log(t.id, 'warn', `Blocked by the crew's permissions: ${what}`.slice(0, 800));
@@ -206,6 +227,7 @@ async function execReport(r, handle) {
       addDirs: p.repos.map(x => x.path).filter(rp => path.relative(p.path, rp).startsWith('..')),
       permissionMode: cfg.settings.permissionMode,
       strictMcp: cfg.settings.strictMcp,
+      inheritEnv: cfg.settings.inheritClaudeEnv,
       tmpDir: TMP,
       onEvent: ev => { for (const l of describeEvent(ev, p.path)) if (l.kind !== 'say') log(r.id, l.kind, l.text); },
     });
@@ -213,6 +235,7 @@ async function execReport(r, handle) {
     if (handle.cancelled) run.kill();
     const res = await run.done;
     r.costUsd = res.costUsd;
+    recordRun(r, res, cfg.settings.reportModel || cfg.settings.model, 'report');
     if (res.ok) {
       Object.assign(r, parseReport(res.result), { status: 'done' });
     } else {
@@ -480,6 +503,8 @@ async function route(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: cfg.settings.port });
+  if (refused) return send(res, refused.code, { error: refused.error });
   try {
     if (url.pathname.startsWith('/api/')) return await route(req, res, url);
     const file = path.join(PUBLIC, url.pathname === '/' ? 'index.html' : path.normalize(url.pathname));

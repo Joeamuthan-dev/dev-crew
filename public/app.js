@@ -15,7 +15,10 @@ let officeEl = null;
 /* ---------------- data ---------------- */
 
 async function api(url, { method = 'GET', body } = {}) {
-  const res = await fetch(url, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  // X-Dev-Crew marks the request as coming from this dashboard; the server refuses state
+  // changes without it (other sites cannot send custom headers to localhost).
+  const headers = { 'x-dev-crew': '1', ...(body ? { 'content-type': 'application/json' } : {}) };
+  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
