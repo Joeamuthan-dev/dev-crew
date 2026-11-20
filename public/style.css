@@ -513,6 +513,28 @@ ol.plan .step-key { font-size: 11px; }
 .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
 .linkish:hover { text-decoration: underline; }
 
+/* project and people editors */
+.modal.wide { width: min(880px, calc(100vw - 32px)); }
+.nav-item.add { color: var(--muted); font-size: 13px; }
+.crumb { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.folder-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; }
+.folder-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.folder-row:last-child { border-bottom: 0; }
+.folder-row .faint { flex: 1; min-width: 0; }
+.row-inline { display: flex; gap: 8px; }
+.row-inline input { flex: 1; }
+.role-rows { display: grid; gap: 8px; }
+.role-row { border: 1px solid var(--line); border-left: 3px solid var(--rc); border-radius: 8px; padding: 8px 10px; display: grid; gap: 6px; }
+.role-row:has(input[name=active]:not(:checked)) .role-fields { display: none; }
+.role-row:has(input[name=active]:not(:checked)) { opacity: 0.6; }
+.role-fields { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; font-size: 12.5px; color: var(--muted); }
+.role-fields label { display: flex; gap: 6px; align-items: center; }
+.role-fields details { flex-basis: 100%; }
+.role-fields textarea { width: 100%; margin-top: 4px; }
+.person-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) auto; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); align-items: center; }
+.person-row input:not([type=checkbox]) { min-width: 0; }
+@media (max-width: 760px) { .person-row { grid-template-columns: 1fr 1fr; } }
+
 /* housekeeping */
 .hk-btn { width: 100%; justify-content: flex-start; margin-bottom: 6px; }
 .hk-summary { padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); margin-bottom: 8px; }

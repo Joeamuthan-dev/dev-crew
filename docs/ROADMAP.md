@@ -115,7 +115,14 @@ Log compression was dropped: logs are moved to `data/archive/logs/` instead.
 - **Prune button and schedule:** a **Prune** button always shows a preview first ("12
   worktrees, 9 branches, 140 MB"). A weekly automatic prune can be switched on in Settings.
 
-## 4. Simpler configuration
+## 4. Simpler configuration — done on `feature/config-ui`
+
+Built: `lib/detect.mjs` (stack and role detection, context draft; local and free, unit tested),
+`lib/configfile.mjs` (validated, backed-up, atomic writes; unit tested), the Add project wizard
+with a folder browser, the project editor (roles on/off, repo, model, notes per role, handoffs,
+limits, extra commands) and the people editor. Unused roles are hidden everywhere and agents are
+told the project has no such role. Not done: the optional Haiku pass to polish the drafted
+context (the local draft from the docs worked well on DataEz, so it was not needed yet).
 
 **Goal:** no hand-editing of JSON for normal use.
 

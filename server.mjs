@@ -15,7 +15,9 @@ import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
 import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH } from './lib/handoffs.mjs';
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
-import { gatherFacts, runPlan, clearTmp } from './lib/cleanup.mjs';
+import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
+import { detectProject, findRepos } from './lib/detect.mjs';
+import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
 const WT_DIR = path.join(DATA, 'worktrees');
@@ -519,6 +521,7 @@ const publicProject = p => ({
   id: p.id, name: p.name, path: p.path, stack: p.stack, context: p.context, exists: p.exists,
   repos: p.repos.map(r => ({ name: r.name, path: r.path, exists: r.exists })), roles: p.roles,
   handoffs: policyFor(p),
+  activeRoles: p.activeRoles,
 });
 
 async function stateView() {
@@ -527,6 +530,7 @@ async function stateView() {
       model: cfg.settings.model, reportModel: cfg.settings.reportModel, maxConcurrent: cfg.settings.maxConcurrent,
       dailyReport: cfg.settings.dailyReport, workspacePath: cfg.settings.workspacePath, configFile: path.basename(cfg.file),
       limits: cfg.settings.limits,
+      handoffs: cfg.settings.handoffs,
     },
     spend: spendView(),
     etas: etas(),
@@ -618,7 +622,7 @@ function startPlan(planTask) {
 /** After a task is done: read its handoffs or plan, and start them if the policy says so. */
 function takeNextSteps(t, p, result) {
   const policy = policyFor(p);
-  const roleIds = ROLES.map(r => r.id);
+  const roleIds = (p && p.activeRoles && p.activeRoles.length) ? p.activeRoles : ROLES.map(r => r.id);
   if (t.planTask) {
     const steps = parsePlan(result, { roleIds });
     if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
@@ -648,6 +652,7 @@ async function createTask(b) {
   if (!p) throw new Error('Unknown project.');
   if (!roleById(b.role)) throw new Error('Unknown role.');
   const plan = b.plan === true || b.plan === 'on' || b.plan === 'true';
+  if (!plan && !p.activeRoles.includes(b.role)) throw new Error(`${p.name} has no ${roleById(b.role).name}. Turn the role on in the project's settings first.`);
   const mode = plan ? 'analyze' : b.mode === 'analyze' ? 'analyze' : 'change';
   const title = String(b.title || '').trim();
   if (!title) throw new Error('Give the task a title.');
@@ -880,6 +885,78 @@ async function route(req, res, url) {
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true, problems: cfg.problems });
+  }
+
+  /* ---- editing the config from the dashboard ---- */
+
+  // Folders to pick a project from: the workspace by default, with which ones hold git repos.
+  if (m === 'GET' && url.pathname === '/api/browse') {
+    const dir = path.resolve(cfg.settings.workspacePath, url.searchParams.get('dir') || '.');
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return send(res, 404, { error: `Folder not found: ${dir}` });
+    const used = new Map(cfg.projects.map(p => [canonical(p.path), p.name]));
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
+      .slice(0, 300)
+      .map(d => {
+        const full = path.join(dir, d.name);
+        return { name: d.name, path: full, repos: findRepos(full).length, usedBy: used.get(canonical(full)) || '' };
+      });
+    const parent = path.dirname(dir);
+    return send(res, 200, { dir, parent: parent !== dir ? parent : '', workspace: cfg.settings.workspacePath, entries });
+  }
+
+  if (m === 'POST' && url.pathname === '/api/detect') {
+    const { folder } = await readBody(req);
+    const dir = path.resolve(cfg.settings.workspacePath, String(folder || ''));
+    if (!folder || !fs.existsSync(dir)) return send(res, 404, { error: `Folder not found: ${dir}` });
+    const found = detectProject(dir);
+    const taken = new Set(cfg.projects.map(p => p.id));
+    let id = found.id;
+    for (let n = 2; taken.has(id); n++) id = `${found.id}-${n}`;
+    return send(res, 200, { ...found, id, repos: found.repos.map(r => ({ name: r.name, stack: r.stack })) });
+  }
+
+  // The raw project as written in the config, for the editor.
+  if (m === 'GET' && parts[1] === 'projects' && parts[2] && parts[3] === 'config') {
+    const rawP = (readRaw().projects || []).find(p => p.id === parts[2]);
+    if (!rawP) return send(res, 404, { error: 'This project is not in crew.config.local.json.' });
+    const p = project(parts[2]);
+    return send(res, 200, { project: rawP, folderPath: p ? p.path : '', repos: p ? p.repos.map(r => r.name) : [] });
+  }
+
+  if (m === 'PUT' && parts[1] === 'projects' && parts[2] && !parts[3]) {
+    const form = await readBody(req);
+    const raw = readRaw();
+    const oldId = parts[2] === '_new' ? null : parts[2];
+    const existing = oldId ? (raw.projects || []).find(p => p.id === oldId) || {} : {};
+    if (oldId && oldId !== form.id && S.tasks.some(t => t.projectId === oldId && ['queued', 'running', 'blocked'].includes(t.status))) {
+      return send(res, 409, { error: 'Finish or cancel this project\'s active tasks before changing its id.' });
+    }
+    const proj = projectFromForm(form, existing, cfg.settings.workspacePath);
+    writeRaw(upsertProject(raw, proj, oldId || proj.id));
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, id: proj.id });
+  }
+
+  if (m === 'DELETE' && parts[1] === 'projects' && parts[2] && !parts[3]) {
+    if (S.tasks.some(t => t.projectId === parts[2] && ['queued', 'running', 'blocked'].includes(t.status))) {
+      return send(res, 409, { error: 'Finish or cancel this project\'s active tasks first.' });
+    }
+    writeRaw(removeProject(readRaw(), parts[2]));
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true });
+  }
+
+  if (m === 'GET' && url.pathname === '/api/people') return send(res, 200, { people: readRaw().people || [] });
+
+  if (m === 'PUT' && url.pathname === '/api/people') {
+    const { people } = await readBody(req);
+    writeRaw({ ...readRaw(), people: peopleFromForm(people) });
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true });
   }
 
   return send(res, 404, { error: 'Not found.' });
