@@ -96,6 +96,11 @@ const tasksOf = pid => S.tasks.filter(t => t.projectId === pid);
 const latestReport = pid => S.reports.find(r => r.projectId === pid && r.status === 'done');
 const isToday = ms => new Date(ms).toDateString() === new Date().toDateString();
 const needsReview = t => t.mode === 'change' && t.status === 'done' && !t.cleaned && t.git && t.git.commits.length > 0;
+const taskOf = id => S.tasks.find(x => x.id === id);
+/** Tasks this one still waits for (not done yet). */
+const waitingOn = t => (t.dependsOn || []).map(taskOf).filter(d => d && d.status !== 'done');
+/** Tasks that started from this one (handoffs and plan steps). */
+const childrenOf = t => S.tasks.filter(x => x.parentId === t.id).sort((a, b) => a.createdAt - b.createdAt);
 
 function ago(ms) {
   if (!ms) return '';
@@ -145,6 +150,10 @@ function statusPill(t) {
   if (t.status === 'queued') return '<span class="pill blue">Queued</span>';
   if (t.status === 'failed') return '<span class="pill red">Failed</span>';
   if (t.status === 'stopped') return `<span class="pill amber" title="${esc(t.error || '')}">Stopped · ${t.stopReason === 'budget' ? 'cost limit' : 'time limit'}</span>`;
+  if (t.status === 'blocked') return `<span class="pill red" title="${esc(t.error || '')}">Blocked</span>`;
+  if (t.status === 'queued' && waitingOn(t).length) return `<span class="pill" title="Starts when the tasks it depends on are done">Waiting</span>`;
+  if (t.status === 'done' && (t.handoffs || []).some(h => h.status === 'proposed')) return '<span class="pill amber">Handoff</span>';
+  if (t.status === 'done' && t.plan && t.plan.status === 'proposed') return '<span class="pill amber">Plan ready</span>';
   if (t.status === 'cancelled') return '<span class="pill">Cancelled</span>';
   if (needsReview(t)) return '<span class="pill amber">Review</span>';
   return '<span class="pill green">Done</span>';
@@ -651,7 +660,10 @@ function taskRow(t, showProject) {
   const p = projOf(t.projectId);
   const where = t.mode === 'change' ? (t.branch || `${t.repo} · new branch`) : `${t.repo === '*' ? 'whole project' : t.repo} · read-only`;
   const eta = etaText(t);
-  const live = (eta ? ` · ${eta}` : '') + (t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '');
+  const parent = t.parentId && taskOf(t.parentId);
+  const from = parent ? ` · ↳ ${t.origin === 'plan' ? 'plan step' : 'from ' + roleOf(parent.role).short}` : '';
+  const waits = t.status === 'queued' && waitingOn(t).length ? ` · waits for ${waitingOn(t).map(d => roleOf(d.role).short).join(', ')}` : '';
+  const live = from + waits + (eta && !waits ? ` · ${eta}` : '') + (t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '');
   return `<div class="row" data-task="${t.id}">
     <div>${roleChip(t.role)}</div>
     <div style="min-width:0">
@@ -815,6 +827,7 @@ function refreshDrawer(first) {
         ${g.commits.length ? `<div class="commits">${esc(g.commits.join('\n'))}</div>` : ''}
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
+    ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
     ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
 
@@ -851,6 +864,61 @@ function refreshDrawer(first) {
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) taskAction('followup'); });
   }
   if (first && ta && t.status !== 'failed') ta.blur();
+}
+
+/* ---------------- handoffs, plans and chains (task drawer) ---------------- */
+
+const modeWord = m => (m === 'analyze' ? 'investigate' : 'make changes');
+
+function handoffsHtml(t) {
+  const list = t.handoffs || [];
+  if (!list.length) return '';
+  const card = h => {
+    const child = h.taskId && taskOf(h.taskId);
+    const state = h.status === 'proposed'
+      ? `<div class="card-actions"><button class="btn sm primary" data-handoff="${h.id}" data-do="start">Start</button><button class="btn sm ghost" data-handoff="${h.id}" data-do="dismiss">Dismiss</button></div>`
+      : h.status === 'started' && child ? `<button class="btn sm ghost" data-task="${child.id}">Open task ${statusPill(child)}</button>`
+        : h.status === 'failed' ? `<span class="err-inline">${esc(h.error || 'Could not start')}</span> <button class="btn sm" data-handoff="${h.id}" data-do="start">Retry</button>`
+          : `<span class="faint">${esc(h.status)}</span>`;
+    return `<div class="handoff">
+      <div class="handoff-top">${roleChip(h.role)} <b>${esc(h.title)}</b> <span class="faint">· ${modeWord(h.mode)}</span></div>
+      ${h.reason ? `<div class="faint">${esc(h.reason)}</div>` : ''}
+      ${h.details ? `<details><summary>Details</summary><div class="md">${md(h.details)}</div></details>` : ''}
+      <div class="handoff-act">${state}</div>
+    </div>`;
+  };
+  const policy = (projOf(t.projectId) || {}).handoffs || 'ask';
+  return `<div class="d-section"><h4>Handoff ${policy === 'auto' ? '<span class="faint">(started automatically)</span>' : ''}</h4>
+    <p class="hint">The ${esc(roleOf(t.role).name)} says another role should act next.${t.mode === 'change' && t.branch ? ` A change task builds on <code>${esc(t.branch)}</code>; an investigation reads its worktree.` : ''}</p>
+    ${list.map(card).join('')}</div>`;
+}
+
+function planHtml(t) {
+  if (!t.plan) return '';
+  const steps = t.plan.steps;
+  const ids = t.plan.taskIds || [];
+  const row = (s, i) => {
+    const task = ids[i] && taskOf(ids[i]);
+    return `<li>${roleChip(s.role)} <b>${esc(s.title)}</b> <span class="faint">· ${modeWord(s.mode)}${s.repo ? ' · ' + esc(s.repo) : ''}${s.dependsOn.length ? ' · after ' + s.dependsOn.map(k => esc(k)).join(', ') : ''}</span>
+      ${task ? ` <button class="btn sm ghost" data-task="${task.id}">${statusPill(task)}</button>` : ''}
+      <div class="faint step-key">${esc(s.key)}</div></li>`;
+  };
+  const acts = t.plan.status === 'proposed'
+    ? `<div class="card-actions"><button class="btn primary" data-plan="start">Start plan (${steps.length} tasks)</button><button class="btn ghost" data-plan="dismiss">Dismiss</button></div>`
+    : `<p class="hint">Plan ${esc(t.plan.status)}.</p>`;
+  return `<div class="d-section"><h4>Plan</h4><ol class="plan">${steps.map(row).join('')}</ol>${acts}</div>`;
+}
+
+function chainHtml(t) {
+  const parent = t.parentId && taskOf(t.parentId);
+  const kids = childrenOf(t).filter(c => !(t.plan && (t.plan.taskIds || []).includes(c.id)) && !(t.handoffs || []).some(h => h.taskId === c.id));
+  const deps = (t.dependsOn || []).filter(id => id !== t.parentId).map(taskOf).filter(Boolean);
+  if (!parent && !kids.length && !deps.length) return '';
+  const line = (label, x) => `<div class="chain-row"><span class="faint">${label}</span> ${roleChip(x.role)} <button class="linkish" data-task="${x.id}">${esc(x.title)}</button> ${statusPill(x)}</div>`;
+  return `<div class="d-section"><h4>Chain</h4>
+    ${parent ? line(t.origin === 'plan' ? 'Plan' : 'From', parent) : ''}
+    ${deps.map(d => line('After', d)).join('')}
+    ${kids.map(k => line('Next', k)).join('')}</div>`;
 }
 
 function refreshReportDrawer() {
@@ -910,9 +978,10 @@ function openAssign(pre = {}) {
     <div class="m-body">
       <div class="field"><label>Project</label>
         <select name="projectId">${S.projects.map(p => `<option value="${p.id}" ${p.id === projectId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
-      <div class="field"><label>Who</label>
+      <label class="check plan-first"><input type="checkbox" name="plan"> <span><b>Plan it first</b> · the Solutions Architect breaks this feature into linked tasks for the crew. You review the plan, then start it.</span></label>
+      <div class="field not-planning"><label>Who</label>
         <div class="role-pick">${S.roles.map(r => `<label style="--rc:${r.color}"><input type="radio" name="role" value="${r.id}" ${r.id === role ? 'checked' : ''}><span class="sw"></span>${esc(r.name)}</label>`).join('')}</div></div>
-      <div class="field"><label>Kind of task</label>
+      <div class="field not-planning"><label>Kind of task</label>
         <div class="mode-pick">
           <label><input type="radio" name="mode" value="change" ${mode === 'change' ? 'checked' : ''}><b>Make changes</b><span>Works on its own new branch and commits. Never pushes.</span></label>
           <label><input type="radio" name="mode" value="analyze" ${mode === 'analyze' ? 'checked' : ''}><b>Investigate &amp; report</b><span>Read-only: review, plan, audit, explain.</span></label>
@@ -1035,6 +1104,19 @@ function openAssign(pre = {}) {
     }
   };
   $('#estBtn').addEventListener('click', runEstimate);
+  // "Plan it first": the task goes to the Architect as a read-only planning task.
+  F.plan.addEventListener('change', () => {
+    const on = F.plan.checked;
+    form.classList.toggle('planning', on);
+    if (on) {
+      form.querySelector('input[name=role][value=architect]').checked = true;
+      form.querySelector('input[name=mode][value=analyze]').checked = true;
+    }
+    F.title.placeholder = on ? 'e.g. Let users export validation results to Excel' : 'e.g. Add pagination to GET /invoices';
+    fillRepos();
+    markStale();
+    fillLimits();
+  });
   F.title.addEventListener('input', markStale);
   F.details.addEventListener('input', markStale);
   F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
@@ -1100,6 +1182,25 @@ document.addEventListener('click', async e => {
       try { await api(`/api/tasks/${t.id}/monday-update`, { method: 'POST' }); toast('Report posted to the ticket'); } catch (err) { toast(err.message, true); }
       return;
     }
+  }
+  // Handoff and plan buttons in the task drawer.
+  const hb = e.target.closest('[data-handoff],[data-plan]');
+  if (hb && drawer) {
+    const d = hb.dataset;
+    hb.disabled = true;
+    try {
+      if (d.handoff) {
+        const r = await api(`/api/tasks/${drawer.id}/handoffs/${d.handoff}/${d.do}`, { method: 'POST' });
+        toast(d.do === 'start' ? `Handed off to the ${roleOf(r.child.role).name}` : 'Handoff dismissed');
+      } else {
+        const r = await api(`/api/tasks/${drawer.id}/plan/${d.plan}`, { method: 'POST' });
+        toast(d.plan === 'start' ? `Plan started: ${r.tasks.length} linked task(s)` : 'Plan dismissed');
+      }
+    } catch (err) {
+      toast(err.message, true);
+      hb.disabled = false;
+    }
+    return;
   }
   const el = e.target.closest('[data-act],[data-task],[data-report],[data-filter],[data-role-filter],[data-rolefilter],[data-close],[data-copy],[data-task-act],[data-report-cancel],[data-suggest],[data-suggest-all],#logBottom');
   if (!el) {

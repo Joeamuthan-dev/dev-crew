@@ -67,7 +67,13 @@ stops at a limit you set.
 - **When a limit stops a task**, it's marked `stopped (limit)`, not failed, and **Continue**
   resumes the session with a new allowance.
 
-## 2. Role handoffs
+## 2. Role handoffs — done on `feature/handoffs`
+
+Built as planned, in `lib/handoffs.mjs` (pure and unit tested), with the "Plan it first" option in
+the Assign dialog. Notes: a plan has at most 8 steps and may only depend on earlier steps (so it
+cannot loop); a task can propose at most 3 handoffs and never to its own role. A task blocked by a
+dependency goes back in the queue once that dependency is done. Queue ETAs do not yet account for
+dependencies (a waiting task shows "waits for …" instead of a time).
 
 **Goal:** when one role finishes and another role is needed, the work is handed over and the
 next role starts. This only happens when it's needed.
