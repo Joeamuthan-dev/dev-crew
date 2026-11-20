@@ -109,6 +109,30 @@ desks per floor, one agent per desk in their role's colour.
 - Drag to pan, scroll to zoom, double-click (or **Fit**) to see the whole office. A floor's rim
   takes the colour of its latest stand-up: green, amber or red.
 
+## Handoffs and plans
+
+**Handoffs.** When an agent finishes and another role must act for the work to be complete (new
+code that needs tests, a schema change the backend must use, a change that needs a pipeline
+update), its report can propose a handoff: which role, what to do, and why. Agents are told to do
+this only when it is genuinely needed, never to their own role, and at most three per task.
+
+- The next task builds on the previous one: a **change** task starts from the previous task's
+  branch; an **investigation** reads the previous task's worktree, so a reviewer or QA sees the
+  new, unmerged work.
+- Policy, set in `settings.handoffs` or per project (`projects[].handoffs`):
+  `"ask"` (default: the handoff shows in the task panel and you press **Start**), `"auto"` (it is
+  queued straight away, within your limits) or `"off"` (agents are not asked for handoffs).
+- Chains stop at five tasks deep; after that you assign the next step yourself.
+
+**Plans.** Tick **Plan it first** in the Assign dialog and describe a feature. The Solutions
+Architect breaks it into up to eight linked tasks for the crew, each with the steps it depends
+on. Review the plan in the task panel and press **Start plan** (or it starts by itself with
+`"auto"`). A step waits until the steps it depends on are done, and builds on their branch when it
+changes the same repo. If a step fails, is cancelled or stops at a limit, the steps after it show
+as **Blocked**, and go back in the queue once it is done (for example after **Continue**).
+
+The task panel's **Chain** section shows where a task came from and what came after it.
+
 ## monday.com tickets
 
 Each project can point at its monday.com board. A column on the board says which crew role a

@@ -13,6 +13,7 @@ import { createMonday } from './lib/monday.mjs';
 import { search as searchPeople, directory, contactsFor } from './lib/people.mjs';
 import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
+import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH } from './lib/handoffs.mjs';
 
 const DATA = path.join(ROOT, 'data');
 const WT_DIR = path.join(DATA, 'worktrees');
@@ -75,9 +76,15 @@ function log(id, kind, text) {
 
 const running = new Map(); // job id -> { kill, cancelled }
 
+const taskById = id => S.tasks.find(x => x.id === id);
+
 function nextJob() {
   let best = null;
-  for (const t of S.tasks) if (t.status === 'queued' && (!best || t.queuedAt < best.job.queuedAt)) best = { kind: 'task', job: t };
+  for (const t of S.tasks) {
+    if (t.status !== 'queued' || (best && t.queuedAt >= best.job.queuedAt)) continue;
+    if (depsState(t, taskById).state !== 'ready') continue; // waits for the tasks it depends on
+    best = { kind: 'task', job: t };
+  }
   for (const r of S.reports) if (r.status === 'queued' && (!best || r.queuedAt < best.job.queuedAt)) best = { kind: 'report', job: r };
   return best;
 }
@@ -149,8 +156,30 @@ function watchTimeout(job, limits, handle) {
   return () => { clearTimeout(warn); clearTimeout(stop); };
 }
 
+/**
+ * Queued tasks whose dependency failed, was cancelled or stopped become 'blocked'; blocked tasks
+ * go back to the queue once that dependency is done (for example after Continue).
+ */
+function refreshBlocked() {
+  for (const t of S.tasks) {
+    if (!(t.dependsOn || []).length || (t.status !== 'queued' && t.status !== 'blocked')) continue;
+    const d = depsState(t, taskById);
+    if (d.state === 'blocked' && t.status === 'queued') {
+      t.status = 'blocked';
+      t.error = d.reason;
+      touchTask(t);
+    } else if (d.state !== 'blocked' && t.status === 'blocked') {
+      t.status = 'queued';
+      t.error = '';
+      t.queuedAt = Date.now();
+      touchTask(t);
+    }
+  }
+}
+
 let budgetNoticeDay = '';
 function pump() {
+  refreshBlocked();
   while (running.size < Math.max(1, cfg.settings.maxConcurrent)) {
     const next = nextJob();
     if (!next) return;
@@ -202,6 +231,13 @@ async function execTask(t, handle) {
     if (!p) throw new Error(`Project "${t.projectId}" is no longer in the config.`);
     refreshRepos(p);
     repo = p.repos.find(r => r.name === t.repo) || null;
+    // A follow-on task builds on the task before it: a change starts from its branch, a read-only
+    // task reads its worktree. Resolved now, because a plan's earlier steps only get branches
+    // when they run.
+    const prev = t.prevId ? taskById(t.prevId) : null;
+    const sp = startPoint(prev, t.mode, t.repo);
+    if (t.mode === 'change' && !t.worktree && !t.base && sp.base) t.base = sp.base;
+    const readFrom = t.mode === 'analyze' && sp.readFrom && fs.existsSync(sp.readFrom) ? sp.readFrom : '';
     let cwd;
     let addDirs = [];
     if (t.mode === 'change') {
@@ -220,6 +256,9 @@ async function execTask(t, handle) {
         throw new Error('The worktree folder for this task is missing.');
       }
       cwd = t.worktree;
+    } else if (readFrom) {
+      cwd = readFrom;
+      log(t.id, 'sys', `Reading the work of "${prev.title}" in its worktree (branch ${prev.branch})`);
     } else if (repo) {
       cwd = repo.path;
     } else {
@@ -244,7 +283,12 @@ async function execTask(t, handle) {
       command: cfg.settings.claudeCommand,
       cwd,
       prompt,
-      systemPrompt: taskSystemPrompt(p, t.role, t.mode, { cwd, branch: t.branch, base: t.base }),
+      systemPrompt: taskSystemPrompt(p, t.role, t.mode, {
+        cwd, branch: t.branch, base: t.base, readFrom,
+        prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
+        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH ? 'off' : policyFor(p),
+        plan: !!t.planTask,
+      }),
       mode: t.mode,
       extraCommands: p.allowCommands,
       model,
@@ -290,7 +334,7 @@ async function execTask(t, handle) {
         : `Stopped at the ${limits.taskTimeoutMin}-minute time limit for this run. Press Continue to resume.`;
       log(t.id, 'warn', t.error);
     }
-    else if (res.ok) t.status = 'done';
+    else if (res.ok) { t.status = 'done'; takeNextSteps(t, p, res.result); }
     else { t.status = 'failed'; t.error = res.error; log(t.id, 'err', res.error); }
   } catch (e) {
     t.status = handle.cancelled ? 'cancelled' : 'failed';
@@ -416,6 +460,7 @@ setInterval(() => pump(), 60000);
 const publicProject = p => ({
   id: p.id, name: p.name, path: p.path, stack: p.stack, context: p.context, exists: p.exists,
   repos: p.repos.map(r => ({ name: r.name, path: r.path, exists: r.exists })), roles: p.roles,
+  handoffs: policyFor(p),
 });
 
 async function stateView() {
@@ -455,15 +500,102 @@ function readBody(req) {
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json' };
 
+/* ---------------- handoffs and plans ---------------- */
+
+const policyFor = p => handoffPolicy(cfg.settings.handoffs, p && p.handoffs);
+
+/**
+ * The repo a follow-on task works in: the one it names, else the previous task's, else the
+ * role's usual repo, else the project's only repo. A read-only task may use the whole project.
+ */
+function followRepo(p, spec, prev) {
+  const names = p.repos.map(r => r.name);
+  const pick = [spec.repo, prev && prev.repo !== '*' ? prev.repo : '', (p.roles[spec.role] || {}).repo, names.length === 1 ? names[0] : '']
+    .find(n => n && names.includes(n));
+  if (pick) return pick;
+  if (spec.mode === 'analyze') return '*';
+  throw new Error(`No repo for "${spec.title}": name one of ${names.join(', ') || '(none found)'}.`);
+}
+
+/** Start one proposed handoff: a new task that builds on its parent. */
+function startHandoff(parent, h) {
+  const p = project(parent.projectId);
+  if ((parent.chainDepth || 0) + 1 > MAX_CHAIN_DEPTH) throw new Error(`This chain is already ${MAX_CHAIN_DEPTH} tasks deep. Assign the next step yourself.`);
+  const child = createTaskFromSpec({
+    projectId: parent.projectId, role: h.role, mode: h.mode, repo: followRepo(p, h, parent),
+    title: h.title, details: [h.details, h.reason ? `Why now: ${h.reason}` : ''].filter(Boolean).join('\n\n'),
+    parentId: parent.id, prevId: parent.id, dependsOn: [parent.id], chainDepth: (parent.chainDepth || 0) + 1, origin: 'handoff',
+  });
+  Object.assign(h, { status: 'started', taskId: child.id });
+  log(parent.id, 'sys', `Handed off to the ${roleById(h.role).name}: "${h.title}"`);
+  return child;
+}
+
+/** Start every step of an Architect plan as linked tasks; returns the new tasks. */
+function startPlan(planTask) {
+  const p = project(planTask.projectId);
+  const plan = planTask.plan;
+  const idByKey = {};
+  const made = [];
+  for (const s of plan.steps) {
+    const deps = s.dependsOn.map(k => idByKey[k]).filter(Boolean);
+    const depTasks = deps.map(taskById);
+    // Build on the latest dependency that changes the same repo; else read the latest one.
+    const repo = followRepo(p, s, depTasks[depTasks.length - 1] || null);
+    const prev = [...depTasks].reverse().find(d => d.mode === 'change' && d.repo === repo) || depTasks[depTasks.length - 1] || planTask;
+    const child = createTaskFromSpec({
+      projectId: planTask.projectId, role: s.role, mode: s.mode, repo, title: s.title, details: s.details,
+      parentId: planTask.id, prevId: prev.id, dependsOn: deps.length ? deps : [planTask.id],
+      chainDepth: (planTask.chainDepth || 0) + 1, origin: 'plan', planKey: s.key,
+    }, { deferPump: true });
+    idByKey[s.key] = child.id;
+    made.push(child);
+  }
+  Object.assign(plan, { status: 'started', taskIds: made.map(t => t.id) });
+  log(planTask.id, 'sys', `Plan started: ${made.length} linked task(s).`);
+  pump();
+  return made;
+}
+
+/** After a task is done: read its handoffs or plan, and start them if the policy says so. */
+function takeNextSteps(t, p, result) {
+  const policy = policyFor(p);
+  const roleIds = ROLES.map(r => r.id);
+  if (t.planTask) {
+    const steps = parsePlan(result, { roleIds });
+    if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
+    t.plan = { steps, status: 'proposed' };
+    if (policy === 'auto') {
+      try { startPlan(t); } catch (e) { t.plan.status = 'proposed'; log(t.id, 'warn', `Could not start the plan: ${e.message}`); }
+    }
+    return;
+  }
+  if (policy === 'off') return;
+  const found = parseHandoffs(result, { fromRole: t.role, roleIds });
+  const have = new Set((t.handoffs || []).map(h => `${h.role}:${h.title.toLowerCase()}`));
+  for (const h of found) {
+    if (have.has(`${h.role}:${h.title.toLowerCase()}`)) continue;
+    (t.handoffs = t.handoffs || []).push({ id: newId('h'), ...h, status: 'proposed' });
+  }
+  if (policy === 'auto') {
+    for (const h of t.handoffs || []) {
+      if (h.status !== 'proposed') continue;
+      try { startHandoff(t, h); } catch (e) { h.status = 'failed'; h.error = e.message; log(t.id, 'warn', e.message); }
+    }
+  }
+}
+
 async function createTask(b) {
   const p = project(b.projectId);
   if (!p) throw new Error('Unknown project.');
   if (!roleById(b.role)) throw new Error('Unknown role.');
-  const mode = b.mode === 'analyze' ? 'analyze' : 'change';
+  const plan = b.plan === true || b.plan === 'on' || b.plan === 'true';
+  const mode = plan ? 'analyze' : b.mode === 'analyze' ? 'analyze' : 'change';
   const title = String(b.title || '').trim();
   if (!title) throw new Error('Give the task a title.');
   refreshRepos(p);
   let repoName = String(b.repo || '').trim();
+  if (plan && !repoName) repoName = '*';
   if (repoName === '*' && mode === 'change') throw new Error('Pick one repo for a task that changes code.');
   if (repoName !== '*' && !p.repos.some(r => r.name === repoName)) {
     if (p.repos.length === 1) repoName = p.repos[0].name;
@@ -478,19 +610,30 @@ async function createTask(b) {
     const ups = (d.updates || []).map(u => `- ${u.by || 'someone'}: ${u.text.replace(/\s+/g, ' ')}`).join('\n');
     details = `monday.com ticket "${d.name}"${d.url ? ` (${d.url})` : ''}\n${cols}${ups ? `\n\nLatest updates on the ticket:\n${ups}` : ''}${details ? `\n\nFrom the owner:\n${details}` : ''}`;
   }
-  const model = String(b.model || '');
-  // Per-task overrides from the Assign dialog; blank fields fall back to role/project/app limits.
-  const limits = cleanLimits({ taskBudgetUsd: b.budgetUsd, taskTimeoutMin: b.timeoutMin });
+  return createTaskFromSpec({
+    projectId: p.id, role: plan ? 'architect' : b.role, mode, repo: repoName, base: String(b.base || '').trim(),
+    title, details, model: String(b.model || ''), ticket,
+    // Per-task overrides from the Assign dialog; blank fields fall back to role/project/app limits.
+    limits: cleanLimits({ taskBudgetUsd: b.budgetUsd, taskTimeoutMin: b.timeoutMin }),
+    planTask: plan, origin: 'owner',
+  });
+}
+
+/** Queue a task from a validated spec: from the owner, a handoff, or a plan step. */
+function createTaskFromSpec(spec, { deferPump = false } = {}) {
   const t = {
-    id: newId('t'), projectId: p.id, role: b.role, mode, repo: repoName, base: String(b.base || '').trim(),
-    title: title.slice(0, 200), details, model, ticket, limits,
+    id: newId('t'), projectId: spec.projectId, role: spec.role, mode: spec.mode, repo: spec.repo, base: spec.base || '',
+    title: String(spec.title).slice(0, 200), details: String(spec.details || '').slice(0, 8000), model: spec.model || '',
+    ticket: spec.ticket || null, limits: spec.limits || {},
+    planTask: !!spec.planTask, parentId: spec.parentId || '', prevId: spec.prevId || '', dependsOn: spec.dependsOn || [],
+    chainDepth: spec.chainDepth || 0, origin: spec.origin || 'owner', planKey: spec.planKey || '',
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
   };
   // Kept so the cost page can later compare what we expected with what happened.
-  t.estimate = estimateFor({ projectId: p.id, role: t.role, mode, model: jobModel(t), text: taskText(t) });
+  t.estimate = estimateFor({ projectId: t.projectId, role: t.role, mode: t.mode, model: jobModel(t), text: taskText(t) });
   S.tasks.unshift(t);
   touchTask(t);
-  pump();
+  if (!deferPump) pump();
   return t;
 }
 
@@ -588,10 +731,30 @@ async function route(req, res, url) {
       pump();
       return send(res, 200, t);
     }
+    // /api/tasks/:id/handoffs/:handoffId/start|dismiss
+    if (m === 'POST' && action === 'handoffs' && parts[4] && (parts[5] === 'start' || parts[5] === 'dismiss')) {
+      const h = (t.handoffs || []).find(x => x.id === parts[4]);
+      if (!h) return send(res, 404, { error: 'No such handoff.' });
+      if (h.status !== 'proposed' && h.status !== 'failed') return send(res, 409, { error: `This handoff was already ${h.status}.` });
+      if (parts[5] === 'dismiss') { h.status = 'dismissed'; touchTask(t); return send(res, 200, t); }
+      const child = startHandoff(t, h);
+      touchTask(t);
+      return send(res, 200, { task: t, child });
+    }
+    // /api/tasks/:id/plan/start|dismiss
+    if (m === 'POST' && action === 'plan' && (parts[4] === 'start' || parts[4] === 'dismiss')) {
+      if (!t.plan) return send(res, 404, { error: 'This task has no plan.' });
+      if (t.plan.status !== 'proposed') return send(res, 409, { error: `This plan was already ${t.plan.status}.` });
+      if (parts[4] === 'dismiss') { t.plan.status = 'dismissed'; touchTask(t); return send(res, 200, t); }
+      const made = startPlan(t);
+      touchTask(t);
+      return send(res, 200, { task: t, tasks: made });
+    }
     if (m === 'POST' && action === 'cancel') {
-      if (t.status === 'queued') { t.status = 'cancelled'; t.pendingFollowup = ''; touchTask(t); }
+      if (t.status === 'queued' || t.status === 'blocked') { t.status = 'cancelled'; t.pendingFollowup = ''; touchTask(t); }
       const h = running.get(t.id);
       if (h) { h.cancelled = true; if (h.kill) h.kill(); }
+      pump(); // tasks that depend on this one become blocked
       return send(res, 200, t);
     }
     if (m === 'POST' && action === 'monday-update') {
@@ -627,6 +790,7 @@ async function route(req, res, url) {
       S.tasks = S.tasks.filter(x => x !== t);
       store.save();
       emit('task-removed', { id: t.id });
+      pump(); // tasks that depend on this one become blocked
       return send(res, 200, { ok: true });
     }
   }
