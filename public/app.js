@@ -69,6 +69,14 @@ function connect() {
     }
     if (drawer && drawer.id === l.id) appendLog([l]);
   });
+  // Queue ETAs and today's spend, re-sent whenever a task or report changes (and every 30s).
+  es.addEventListener('queue', e => {
+    const q = JSON.parse(e.data);
+    S.etas = q.etas;
+    S.spend = q.spend;
+    schedule();
+    if (drawer) refreshDrawer();
+  });
   es.addEventListener('reload', () => load());
   es.addEventListener('monday', () => load());
 }
@@ -101,6 +109,32 @@ function ago(ms) {
 const fmtTime = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const money = n => (n ? `$${n.toFixed(2)}` : '');
 
+/** 90000 -> "2m", 5400000 -> "1h 30m". */
+function dur(ms) {
+  const m = Math.max(1, Math.round((ms || 0) / 60000));
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
+}
+
+/** "starts in 4m", "~3m left", "waiting: daily limit" for a queued or running task. */
+function etaText(t) {
+  const e = S.etas && S.etas[t.id];
+  const now = Date.now();
+  if (t.status === 'queued') {
+    if (!e) return S.spend && S.spend.paused ? 'waiting: daily spend limit reached' : '';
+    return e.start - now < 60000 ? `starts now · ~${dur(e.end - e.start)}` : `starts in ${dur(e.start - now)} · ~${dur(e.end - e.start)}`;
+  }
+  if (t.status === 'running' && e) return e.end - now <= 60000 ? 'finishing soon' : `~${dur(e.end - now)} left`;
+  return '';
+}
+
+/** "4–7m · $0.30–$0.60" from an estimate's 25th–75th percentiles. */
+function estRange(est) {
+  const c = est.costUsd;
+  const cost = c.p75 < 0.01 ? '<$0.01' : `$${c.p25.toFixed(2)}–$${c.p75.toFixed(2)}`;
+  return `${dur(est.wallMs.p25)}–${dur(est.wallMs.p75)} · ${cost}`;
+}
+
 function roleChip(roleId, cls = '') {
   const r = roleOf(roleId);
   return `<span class="role-chip ${cls}" style="--rc:${r.color}" title="${esc(r.name)}">${esc(r.short)}</span>`;
@@ -110,6 +144,7 @@ function statusPill(t) {
   if (t.status === 'running') return '<span class="pill blue">Working</span>';
   if (t.status === 'queued') return '<span class="pill blue">Queued</span>';
   if (t.status === 'failed') return '<span class="pill red">Failed</span>';
+  if (t.status === 'stopped') return `<span class="pill amber" title="${esc(t.error || '')}">Stopped · ${t.stopReason === 'budget' ? 'cost limit' : 'time limit'}</span>`;
   if (t.status === 'cancelled') return '<span class="pill">Cancelled</span>';
   if (needsReview(t)) return '<span class="pill amber">Review</span>';
   return '<span class="pill green">Done</span>';
@@ -227,13 +262,15 @@ function renderTop() {
   const running = S.tasks.filter(t => t.status === 'running').length + S.reports.filter(r => r.status === 'running').length;
   const queued = S.tasks.filter(t => t.status === 'queued').length + S.reports.filter(r => r.status === 'queued').length;
   const review = S.tasks.filter(needsReview).length;
-  const spent = S.tasks.filter(t => isToday(t.startedAt)).reduce((a, t) => a + (t.costUsd || 0), 0)
-    + S.reports.filter(r => isToday(r.startedAt)).reduce((a, r) => a + (r.costUsd || 0), 0);
+  const sp = S.spend || { today: 0, daily: 0, state: 'ok' };
+  const spendTitle = sp.paused
+    ? 'Daily spend limit reached: queued runs wait until tomorrow or until the limit is raised'
+    : 'API-equivalent cost reported by Claude Code, against your daily limit';
   $('#topStats').innerHTML = `
     <span><b>${running}</b> working</span>
     <span><b>${queued}</b> queued</span>
     <span><b>${review}</b> to review</span>
-    ${spent ? `<span title="API-equivalent cost reported by Claude Code"><b>${money(spent)}</b> today</span>` : ''}`;
+    <span class="spend ${sp.state}" title="${spendTitle}"><b>$${sp.today.toFixed(2)}</b>${sp.daily ? ` / $${sp.daily}` : ''} today${sp.paused ? ' · paused' : ''}</span>`;
 }
 
 function renderSidebar() {
@@ -613,7 +650,8 @@ function todayView() {
 function taskRow(t, showProject) {
   const p = projOf(t.projectId);
   const where = t.mode === 'change' ? (t.branch || `${t.repo} · new branch`) : `${t.repo === '*' ? 'whole project' : t.repo} · read-only`;
-  const live = t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '';
+  const eta = etaText(t);
+  const live = (eta ? ` · ${eta}` : '') + (t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '');
   return `<div class="row" data-task="${t.id}">
     <div>${roleChip(t.role)}</div>
     <div style="min-width:0">
@@ -766,7 +804,9 @@ function refreshDrawer(first) {
       ${t.branch ? `<dt>Branch</dt><dd><code>${esc(t.branch)}</code> from <code>${esc(t.base)}</code></dd>` : t.base ? `<dt>Base</dt><dd><code>${esc(t.base)}</code></dd>` : ''}
       ${t.worktree ? `<dt>Worktree</dt><dd>${t.cleaned ? '<i>removed (branch kept)</i>' : `<code>${esc(t.worktree)}</code>`}</dd>` : ''}
       <dt>Assigned</dt><dd>${fmtTime(t.createdAt)}${t.endedAt ? ` · finished ${ago(t.endedAt)}` : ''}</dd>
-      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.model ? ' · ' + esc(t.model) : ''}</dd>` : ''}
+      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.wallMs ? ' · ' + dur(t.wallMs) : ''}${t.model ? ' · ' + esc(t.model) : ''}${t.tokens ? ` · ${(t.tokens.input + t.tokens.output + t.tokens.cacheRead + t.tokens.cacheWrite).toLocaleString()} tokens` : ''}</dd>` : ''}
+      ${t.estimate ? `<dt>Estimate</dt><dd>${estRange(t.estimate)} <span style="color:var(--faint)">${t.estimate.basis === 'default' ? '(rough)' : `(from ${t.estimate.samples} past runs)`}</span>${etaText(t) ? ' · ' + esc(etaText(t)) : ''}</dd>` : ''}
+      ${t.appliedLimits || t.limits ? (() => { const l = t.appliedLimits || {}; const parts = [l.taskBudgetUsd ? `$${l.taskBudgetUsd} per run` : '', l.taskTimeoutMin ? `${l.taskTimeoutMin} min per run` : ''].filter(Boolean); return parts.length ? `<dt>Limits</dt><dd>${parts.join(' · ')}</dd>` : ''; })() : ''}
     </dl>
     ${t.details ? `<div class="d-section"><h4>Details</h4><div class="box md">${md(t.details)}</div></div>` : ''}
     ${t.error && t.status !== 'done' ? `<div class="d-section"><div class="err-box">${esc(t.error)}</div></div>` : ''}
@@ -790,6 +830,7 @@ function refreshDrawer(first) {
         ${!active && t.worktree && !t.cleaned ? '<button class="btn" data-task-act="cleanup" title="Delete the worktree folder; the branch stays in the repo">Remove worktree</button>' : ''}
         ${!active ? '<button class="btn ghost danger" data-task-act="delete">Delete</button>' : ''}
       </div>
+      ${canFollow && t.status === 'stopped' ? '<button class="btn" data-task-act="continue" title="Resume the same session with a new allowance">Continue</button>' : ''}
       ${canFollow ? '<button class="btn primary" data-task-act="followup">Send follow-up</button>' : ''}
     </div>`;
   const ta = foot.querySelector('textarea');
@@ -819,6 +860,9 @@ async function taskAction(act) {
       await api(`/api/tasks/${id}/followup`, { method: 'POST', body: { text } });
       $('#followText').value = '';
       toast('Sent — the agent picks it up next');
+    } else if (act === 'continue') {
+      await api(`/api/tasks/${id}/followup`, { method: 'POST', body: { text: 'Continue where you stopped. You hit a run limit; finish the task and give the usual report.' } });
+      toast('Continuing: the agent picks it up next');
     } else if (act === 'cancel') {
       await api(`/api/tasks/${id}/cancel`, { method: 'POST' });
     } else if (act === 'cleanup') {
@@ -865,6 +909,13 @@ function openAssign(pre = {}) {
         <textarea name="details" rows="4" placeholder="Acceptance criteria, ticket text, links, constraints…">${esc(pre.details || '')}</textarea></div>
       <div class="field"><label>Model</label>
         <select name="model"><option value="">Default (${esc(S.settings.model)})</option><option value="sonnet">Sonnet</option><option value="opus">Opus — hardest tasks</option><option value="haiku">Haiku — quick, cheap</option></select></div>
+      <div class="estimate" id="estBox" aria-live="polite">Estimating…</div>
+      <div class="grid2">
+        <div class="field"><label>Cost limit per run <span style="font-weight:400;color:var(--faint)">(USD, 0 = none)</span></label>
+          <input type="number" name="budgetUsd" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label>Time limit per run <span style="font-weight:400;color:var(--faint)">(minutes, 0 = none)</span></label>
+          <input type="number" name="timeoutMin" min="0" step="5" inputmode="numeric"></div>
+      </div>
     </div>
     <div class="m-foot">
       <label class="check"><input type="checkbox" name="more"> Keep open to assign another</label>
@@ -896,12 +947,52 @@ function openAssign(pre = {}) {
         || '<option value="">Current branch</option>';
     } catch { /* keep the default */ }
   };
-  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); });
+  // Estimate and default limits for the current project / role / mode / model. The limit fields
+  // are refilled with the defaults until the owner edits them.
+  let limitsTouched = false;
+  let estSeq = 0;
+  let lastEst = null;
+  // Warn when a typical run of this kind would not fit inside the limits as set.
+  const checkLimitFit = e => {
+    const el = $('#estWarn');
+    if (!el || !e) return;
+    const budget = Number(F.budgetUsd.value) || 0;
+    const mins = Number(F.timeoutMin.value) || 0;
+    const warn = [];
+    if (budget && e.estimate.costUsd.p75 > budget) warn.push(`may hit the $${budget} cost limit`);
+    if (mins && e.estimate.wallMs.p75 > mins * 60000) warn.push(`may hit the ${mins}-minute time limit`);
+    el.innerHTML = warn.length ? `<b class="warn">Runs like this ${warn.join(' and ')}. Raise the limit or pick a cheaper model.</b>` : '';
+  };
+  const fillEstimate = async () => {
+    const seq = ++estSeq;
+    const q = new URLSearchParams({ project: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value });
+    try {
+      const e = await api(`/api/estimate?${q}`);
+      if (seq !== estSeq) return;
+      if (!limitsTouched) { F.budgetUsd.value = e.limits.taskBudgetUsd; F.timeoutMin.value = e.limits.taskTimeoutMin; }
+      const basis = e.estimate.basis === 'default'
+        ? '<span class="faint">rough estimate: no past runs of this kind yet</span>'
+        : `<span class="faint">from ${e.estimate.samples} past ${e.estimate.basis === 'project-role' ? 'runs by this role on this project' : e.estimate.basis === 'role' ? 'runs by this role' : 'runs of this kind'}</span>`;
+      const when = e.spend.paused
+        ? '<b class="warn">Waits: today\'s spend limit is reached</b>'
+        : e.eta ? (e.eta.start - Date.now() < 60000 ? 'Starts now' : `Starts in ~${dur(e.eta.start - Date.now())}`) + ` · done by ~${new Date(e.eta.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+      $('#estBox').innerHTML = `<div><b>Usually ${estRange(e.estimate)}</b> · ${esc(e.model)}</div><div>${when}</div><div>${basis}</div><div id="estWarn"></div>`;
+      checkLimitFit(e);
+      lastEst = e;
+    } catch (err) {
+      if (seq === estSeq) $('#estBox').textContent = `No estimate: ${err.message}`;
+    }
+  };
+  F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
+  F.timeoutMin.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
+  F.model.addEventListener('change', fillEstimate);
+  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); fillEstimate(); });
   F.repo.addEventListener('change', fillBranches);
-  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); }));
+  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); fillEstimate(); }));
   form.querySelectorAll('input[name=role]').forEach(i => i.addEventListener('change', () => {
     if (!modeTouched) form.querySelector(`input[name=mode][value=${roleOf(F.role.value).defaultMode}]`).checked = true;
     fillRepos();
+    fillEstimate();
   }));
   form.addEventListener('submit', async e => {
     if (e.submitter && e.submitter.value === 'cancel') return;
@@ -921,6 +1012,7 @@ function openAssign(pre = {}) {
     }
   });
   fillRepos();
+  fillEstimate();
   dlg.showModal();
   F.title.focus();
 }

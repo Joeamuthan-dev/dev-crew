@@ -191,6 +191,29 @@ shows today's cost as Claude Code reports it. Sonnet is the default. Pick **Haik
 dialog for quick chores and **Opus** for hard ones. A stand-up is usually a few cents to a few
 tens of cents.
 
+### Estimates and limits
+
+Before you assign a task, the dialog shows how long and how much it usually takes (the middle
+half of past runs by that role, on that project, with that model), when it would start given the
+queue, and when it should be done. With fewer than five past runs it shows a rough default and
+says so. Queued and running tasks show their ETA in the task lists.
+
+Every run stays inside limits. Set defaults in `settings.limits`, and override them per project
+(`projects[].limits`), per role (`projects[].roles.<role>.limits`) or per task in the dialog:
+
+```json
+"limits": { "taskBudgetUsd": 2, "taskTimeoutMin": 30, "dailyBudgetUsd": 20, "warnAt": 0.8 }
+```
+
+| Limit | What happens |
+|---|---|
+| `taskBudgetUsd` | Passed to Claude Code as `--max-budget-usd`; the run stops when it is reached. |
+| `taskTimeoutMin` | The server stops the run, with a warning in the log at `warnAt` (80%). |
+| `dailyBudgetUsd` | Once today's spend reaches it, queued runs wait until tomorrow or until you raise it. The top bar turns amber at 80% and red when reached. |
+
+`0` means no limit. A run stopped by a limit is marked **Stopped**, not failed: press
+**Continue** to resume the same session with a fresh allowance.
+
 ## Files
 
 ```
