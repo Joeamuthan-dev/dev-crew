@@ -369,6 +369,8 @@ export function createOffice(host, { onAgent, onZone, onHub }) {
       zones.push(zone);
 
       ROLE_ORDER.forEach((roleId, i) => {
+        // A role the project does not use gets no desk; the others keep their usual spot.
+        if (p.activeRoles && !p.activeRoles.includes(roleId)) return;
         const role = roles.find(r => r.id === roleId) || { color: '#888', short: roleId, name: roleId };
         const x = ((i % 3) - 1) * 3.1;
         const side = i < 3 ? -1 : 1;
@@ -595,7 +597,7 @@ export function createOffice(host, { onAgent, onZone, onHub }) {
     hubMat.color = mix(bg, dark ? '#ffffff' : '#c8ced9', dark ? 0.1 : 0.5);
     M.divider.color = mix(bg, dark ? '#ffffff' : '#94a3b8', dark ? 0.15 : 0.4);
 
-    const key = S.projects.map(p => p.id).join('|');
+    const key = S.projects.map(p => `${p.id}:${(p.activeRoles || []).join(',')}`).join('|');
     if (key !== zoneKey) { zoneKey = key; buildZones(S.projects, S.roles); }
 
     for (const z of zones) {
@@ -612,6 +614,7 @@ export function createOffice(host, { onAgent, onZone, onHub }) {
 
       for (const roleId of ROLE_ORDER) {
         const a = agents.get(`${z.id}:${roleId}`);
+        if (!a) continue; // role not used on this project
         const mine = tasks.filter(t => t.role === roleId);
         const run = mine.find(t => t.status === 'running');
         const queued = mine.filter(t => t.status === 'queued').length;

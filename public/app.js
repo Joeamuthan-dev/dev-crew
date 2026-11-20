@@ -97,6 +97,8 @@ const latestReport = pid => S.reports.find(r => r.projectId === pid && r.status 
 const isToday = ms => new Date(ms).toDateString() === new Date().toDateString();
 const needsReview = t => t.mode === 'change' && t.status === 'done' && !t.cleaned && t.git && t.git.commits.length > 0;
 const taskOf = id => S.tasks.find(x => x.id === id);
+/** The roles a project uses (all of them when it does not say). */
+const crewRoles = p => S.roles.filter(r => !p || !p.activeRoles || p.activeRoles.includes(r.id));
 /** Tasks this one still waits for (not done yet). */
 const waitingOn = t => (t.dependsOn || []).map(taskOf).filter(d => d && d.status !== 'done');
 /** Tasks that started from this one (handoffs and plan steps). */
@@ -298,8 +300,10 @@ function renderSidebar() {
     <a class="nav-item ${r.view === 'office' ? 'active' : ''}" href="#/office"><span class="grow">Office</span></a>
     <a class="nav-item ${r.view === 'today' ? 'active' : ''}" href="#/today"><span class="grow">Today</span></a>
     <div class="nav-label">Projects</div>
-    ${items || '<div class="empty">No projects in the config.</div>'}
+    ${items || '<div class="empty">No projects yet.</div>'}
+    <a class="nav-item add" href="#" data-add-project><span class="grow">+ Add project</span></a>
     <div class="nav-foot">
+      <button class="btn sm ghost hk-btn" data-people title="Staff and contractors behind each project and role">People</button>
       <button class="btn sm ghost hk-btn" data-housekeeping title="Remove old worktrees and merged branches, archive old tasks">Housekeeping</button>
       <div>Stand-up: ${dr.enabled ? (S.nextDaily ? fmtTime(S.nextDaily) : dr.at) : 'off'}</div>
       <div>${S.claude.found ? esc(S.claude.version) : '<span style="color:var(--red)">Claude Code not found</span>'}</div>
@@ -637,7 +641,7 @@ function todayView() {
         <div><b>${ts.filter(needsReview).length}</b>to review</div>
         <div><b>${ts.filter(t => t.status === 'done' && isToday(t.endedAt)).length}</b>done today</div>
       </div>
-      <div class="crew-strip">${S.roles.map(r => roleChip(r.id, busy.has(r.id) ? 'busy' : 'idle')).join('')}</div>
+      <div class="crew-strip">${crewRoles(p).map(r => roleChip(r.id, busy.has(r.id) ? 'busy' : 'idle')).join('')}</div>
       <div class="card-actions">
         <button class="btn sm" data-act="assign" data-project="${p.id}">Assign</button>
         <a class="btn sm ghost" href="#/p/${p.id}/standups">Stand-ups</a>
@@ -647,7 +651,7 @@ function todayView() {
 
   return `
     <div class="page-head">
-      <div><h1>${greet}</h1><div class="sub">${dateStr} · ${S.projects.length} projects · ${S.roles.length} roles each</div></div>
+      <div><h1>${greet}</h1><div class="sub">${dateStr} · ${S.projects.length} project${S.projects.length === 1 ? '' : 's'}</div></div>
     </div>
     ${problemsNotice()}
     <div class="proj-grid">${cards}</div>
@@ -691,6 +695,7 @@ function projectView(p, tab) {
           : `<span class="repo-chip missing" title="${esc(p.path)}">folder not found</span>`}</div>
       </div>
       <div class="card-actions">
+        <button class="btn ghost" data-edit-project="${p.id}">Edit project</button>
         <button class="btn" data-act="standup" data-project="${p.id}">Run stand-up</button>
         <button class="btn primary" data-act="assign" data-project="${p.id}">+ Assign</button>
       </div>
@@ -702,7 +707,8 @@ function projectView(p, tab) {
 
 function crewTab(p) {
   const ts = tasksOf(p.id);
-  return `<div class="crew-grid">${S.roles.map(r => {
+  const off = S.roles.filter(r => !crewRoles(p).includes(r));
+  return `<div class="crew-grid">${crewRoles(p).map(r => {
     const mine = ts.filter(t => t.role === r.id);
     const run = mine.find(t => t.status === 'running');
     const queued = mine.filter(t => t.status === 'queued').length;
@@ -721,7 +727,8 @@ function crewTab(p) {
         <a class="btn sm ghost" href="#/p/${p.id}/tasks" data-rolefilter="${r.id}">History (${mine.length})</a>
       </div>
     </div>`;
-  }).join('')}</div>`;
+  }).join('')}</div>
+  ${off.length ? `<p class="hint" style="margin-top:12px">Not on this project: ${off.map(r => esc(r.name)).join(', ')}. <a href="#" data-edit-project="${p.id}">Change roles</a></p>` : ''}`;
 }
 
 function tasksTab(p) {
@@ -735,7 +742,7 @@ function tasksTab(p) {
       ${filters.map(([k, l]) => `<button class="chip-btn ${f === k ? 'on' : ''}" data-filter="${k}">${l}</button>`).join('')}
       <span style="width:12px"></span>
       <button class="chip-btn ${!ui.roleFilter ? 'on' : ''}" data-role-filter="">All roles</button>
-      ${S.roles.map(r => `<button class="chip-btn ${ui.roleFilter === r.id ? 'on' : ''}" data-role-filter="${r.id}">${esc(r.short)}</button>`).join('')}
+      ${crewRoles(p).map(r => `<button class="chip-btn ${ui.roleFilter === r.id ? 'on' : ''}" data-role-filter="${r.id}">${esc(r.short)}</button>`).join('')}
     </div>
     <div class="card list">${ts.length ? ts.map(t => taskRow(t, false)).join('') : '<div class="empty">No tasks match.</div>'}</div>`;
 }
@@ -792,6 +799,200 @@ function appendLog(lines, force) {
   const atBottom = force || box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   box.insertAdjacentHTML('beforeend', lines.map(l => `<div class="l ${l.kind}">${esc(l.text)}</div>`).join(''));
   if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------------- project editor (add / edit) ---------------- */
+
+const MODELS = [['', 'Default'], ['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']];
+
+/** Add (projectId null: pick a folder first) or edit a project's settings. */
+async function openProjectEditor(projectId) {
+  const dlg = $('#cfgDlg');
+  if (!projectId) return browseFolder(dlg, '');
+  try {
+    const c = await api(`/api/projects/${encodeURIComponent(projectId)}/config`);
+    projectForm(dlg, { ...c.project, folderPath: c.folderPath, repoNames: c.repos }, projectId);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function browseFolder(dlg, dir) {
+  let b;
+  try { b = await api(`/api/browse?dir=${encodeURIComponent(dir)}`); } catch (e) { return toast(e.message, true); }
+  dlg.innerHTML = `<form method="dialog" id="cfgForm">
+    <div class="m-head"><h2>Add a project</h2><button class="icon-btn" value="cancel" formnovalidate aria-label="Close">✕</button></div>
+    <div class="m-body">
+      <p class="hint">Pick the folder that holds the project's git repos (or a repo itself). Dev Crew looks at the files to suggest the stack and the roles; nothing is changed.</p>
+      <div class="crumb"><code>${esc(b.dir)}</code>${b.parent ? ` <button type="button" class="btn sm ghost" data-browse="${esc(b.parent)}">↑ Up</button>` : ''}</div>
+      <div class="folder-list">${b.entries.length ? b.entries.map(e => `
+        <div class="folder-row">
+          <button type="button" class="linkish" data-browse="${esc(e.path)}">📁 ${esc(e.name)}</button>
+          <span class="faint">${e.repos ? `${e.repos} git repo${e.repos === 1 ? '' : 's'}` : 'no git repo'}${e.usedBy ? ` · already the project “${esc(e.usedBy)}”` : ''}</span>
+          ${e.repos ? `<button type="button" class="btn sm" data-pick-folder="${esc(e.path)}">Use this</button>` : ''}
+        </div>`).join('') : '<div class="empty">No sub-folders here.</div>'}</div>
+      <div class="field"><label>Or type a folder path</label><div class="row-inline"><input type="text" id="folderPath" placeholder="C:\\Work\\billing" value=""><button type="button" class="btn" data-pick-folder="">Use this</button></div></div>
+    </div>
+    <div class="m-foot"><span></span><div class="card-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button></div></div>
+  </form>`;
+  if (!dlg.open) dlg.showModal();
+  dlg.onclick = async e => {
+    const br = e.target.closest('[data-browse]');
+    if (br) return browseFolder(dlg, br.dataset.browse);
+    const pk = e.target.closest('[data-pick-folder]');
+    if (!pk) return;
+    const folder = pk.dataset.pickFolder || ($('#folderPath').value || '').trim();
+    if (!folder) return toast('Type a folder path first', true);
+    pk.disabled = true;
+    pk.textContent = 'Looking…';
+    try {
+      const d = await api('/api/detect', { method: 'POST', body: { folder } });
+      if (!d.repos.length) { toast('No git repos found in that folder', true); pk.disabled = false; pk.textContent = 'Use this'; return; }
+      projectForm(dlg, { ...d, folderPath: d.folder, repoNames: d.repos.map(r => r.name), detected: d }, null);
+    } catch (err) {
+      toast(err.message, true);
+      pk.disabled = false;
+      pk.textContent = 'Use this';
+    }
+  };
+}
+
+function projectForm(dlg, p, oldId) {
+  const isNew = !oldId;
+  const active = new Set(p.activeRoles && p.activeRoles.length ? p.activeRoles : S.roles.map(r => r.id));
+  const repoOpts = sel => ['', ...(p.repoNames || [])].map(n => `<option value="${esc(n)}" ${n === sel ? 'selected' : ''}>${n ? esc(n) : '—'}</option>`).join('');
+  const lim = p.limits || {};
+  const roleRows = S.roles.map(r => {
+    const rc = (p.roles || {})[r.id] || {};
+    return `<div class="role-row" style="--rc:${r.color}">
+      <label class="check"><input type="checkbox" name="active" value="${r.id}" ${active.has(r.id) ? 'checked' : ''}> <span class="role-chip" style="--rc:${r.color}">${esc(r.short)}</span> <b>${esc(r.name)}</b></label>
+      <div class="role-fields">
+        <label>Repo <select name="repo_${r.id}">${repoOpts(rc.repo || '')}</select></label>
+        <label>Model <select name="model_${r.id}">${MODELS.map(([v, l]) => `<option value="${v}" ${v === (rc.model || '') ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <details ${rc.notes ? 'open' : ''}><summary>Notes for this role</summary><textarea name="notes_${r.id}" rows="2" placeholder="Standing instructions, e.g. where migrations live">${esc(rc.notes || '')}</textarea></details>
+      </div>
+    </div>`;
+  }).join('');
+  dlg.innerHTML = `<form method="dialog" id="cfgForm">
+    <div class="m-head"><h2>${isNew ? 'Add a project' : `Edit ${esc(p.name)}`}</h2><button class="icon-btn" value="cancel" formnovalidate aria-label="Close">✕</button></div>
+    <div class="m-body">
+      ${p.detected ? `<div class="linked">Found ${p.detected.repos.length} repo(s): ${p.detected.repos.map(r => `<b>${esc(r.name)}</b>${r.stack.length ? ` (${esc(r.stack.slice(0, 4).join(', '))}${r.stack.length > 4 ? '…' : ''})` : ''}`).join('; ')}. Check the suggestions below.</div>` : ''}
+      <div class="grid2">
+        <div class="field"><label>Name</label><input type="text" name="name" required maxlength="80" value="${esc(p.name || '')}"></div>
+        <div class="field"><label>Id <span class="faint">(lower-case, digits, dashes)</span></label><input type="text" name="id" required pattern="[a-z0-9][a-z0-9-]*" maxlength="40" value="${esc(p.id || '')}"></div>
+      </div>
+      <div class="field"><label>Folder</label><input type="text" name="folder" value="${esc(p.folderPath || p.folder || '')}" ${isNew ? 'readonly' : ''}></div>
+      <div class="field"><label>Tech stack <span class="faint">(every agent reads this; be specific)</span></label><textarea name="stack" rows="2">${esc(p.stack || '')}</textarea></div>
+      <div class="field"><label>Context <span class="faint">(what the project is for, how you work)</span></label><textarea name="context" rows="3">${esc(p.context || '')}</textarea></div>
+      <div class="field"><label>Crew <span class="faint">(untick roles this project does not need: they get no desk and no work)</span></label><div class="role-rows">${roleRows}</div></div>
+      <div class="grid2">
+        <div class="field"><label>Handoffs</label><select name="handoffs">
+          ${[['', `App default (${esc(S.settings.handoffs || 'ask')})`], ['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']].map(([v, l]) => `<option value="${v}" ${v === (p.handoffs || '') ? 'selected' : ''}>${l}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>Extra allowed commands <span class="faint">(one per line)</span></label><textarea name="allowCommands" rows="2" placeholder="npm run e2e">${esc((p.allowCommands || []).join('\n'))}</textarea></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>Cost limit per run for this project <span class="faint">(USD, blank = app default)</span></label><input type="number" name="lim_budget" min="0" step="0.5" value="${lim.taskBudgetUsd ?? ''}"></div>
+        <div class="field"><label>Time limit per run <span class="faint">(minutes, blank = app default)</span></label><input type="number" name="lim_time" min="0" step="5" value="${lim.taskTimeoutMin ?? ''}"></div>
+      </div>
+      <p class="hint">Saved to <code>crew.config.local.json</code>. The previous version is kept in <code>data/config-backups</code>.</p>
+    </div>
+    <div class="m-foot">
+      ${isNew ? '<button type="button" class="btn ghost" data-browse-again>← Pick another folder</button>' : `<button type="button" class="btn ghost danger" data-remove-project="${esc(oldId)}">Remove project</button>`}
+      <div class="card-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok" id="cfgSave">${isNew ? 'Add project' : 'Save'}</button></div>
+    </div>
+  </form>`;
+  if (!dlg.open) dlg.showModal();
+  const form = $('#cfgForm');
+  dlg.onclick = async e => {
+    if (e.target.closest('[data-browse-again]')) return browseFolder(dlg, '');
+    const rm = e.target.closest('[data-remove-project]');
+    if (!rm) return;
+    if (!confirm(`Remove "${p.name}" from Dev Crew?\nOnly the config entry goes: its folder, repos, branches and task history stay.`)) return;
+    try {
+      await api(`/api/projects/${encodeURIComponent(rm.dataset.removeProject)}`, { method: 'DELETE' });
+      toast(`${p.name} removed`);
+      dlg.close();
+      location.hash = '#/today';
+    } catch (err) { toast(err.message, true); }
+  };
+  form.addEventListener('submit', async e => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    e.preventDefault();
+    const F = form.elements;
+    const activeRoles = [...form.querySelectorAll('input[name=active]:checked')].map(i => i.value);
+    if (!activeRoles.length) return toast('Keep at least one role', true);
+    const roles = {};
+    for (const r of S.roles) roles[r.id] = { repo: F[`repo_${r.id}`].value, model: F[`model_${r.id}`].value, notes: F[`notes_${r.id}`].value, limits: ((p.roles || {})[r.id] || {}).limits };
+    const body = {
+      id: F.id.value.trim(), name: F.name.value, folder: F.folder.value, stack: F.stack.value, context: F.context.value,
+      activeRoles, roles, handoffs: F.handoffs.value, allowCommands: F.allowCommands.value,
+      limits: { ...(p.limits || {}), taskBudgetUsd: F.lim_budget.value, taskTimeoutMin: F.lim_time.value },
+    };
+    const btn = $('#cfgSave');
+    btn.disabled = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(oldId || '_new')}`, { method: 'PUT', body });
+      toast(isNew ? `${body.name} added` : 'Saved');
+      dlg.close();
+      location.hash = `#/p/${r.id}`;
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+/* ---------------- people editor ---------------- */
+
+async function openPeople() {
+  const dlg = $('#cfgDlg');
+  let people;
+  try { people = (await api('/api/people')).people; } catch (e) { return toast(e.message, true); }
+  const row = (x = {}) => `<div class="person-row">
+    <input name="name" placeholder="Name" value="${esc(x.name || '')}">
+    <input name="title" placeholder="Title" value="${esc(x.title || '')}">
+    <input name="company" placeholder="Company" value="${esc(x.company || '')}">
+    <input name="email" placeholder="Email" value="${esc(x.email || '')}">
+    <input name="teams" placeholder="Teams (email)" value="${esc(x.teams || '')}">
+    <input name="hours" placeholder="Hours, e.g. Mon–Fri 9–17" value="${esc(x.hours || '')}">
+    <input name="projects" placeholder="Projects (ids, or *)" value="${esc((x.projects || []).join(', '))}">
+    <input name="roles" placeholder="Roles, e.g. backend, qa" value="${esc((x.roles || []).join(', '))}">
+    <input name="skills" placeholder="Skills" value="${esc((x.skills || []).join(', '))}">
+    <label class="check"><input type="checkbox" name="contractor" ${x.contractor ? 'checked' : ''}> Contractor</label>
+    <button type="button" class="icon-btn" data-person-remove aria-label="Remove">✕</button>
+  </div>`;
+  dlg.innerHTML = `<form method="dialog" id="cfgForm">
+    <div class="m-head"><h2>People</h2><button class="icon-btn" value="cancel" formnovalidate aria-label="Close">✕</button></div>
+    <div class="m-body">
+      <p class="hint">Staff and contractors behind each project and role. "Who should I ask?" and the agent cards use this list. Projects: ${S.projects.map(p => `<code>${esc(p.id)}</code>`).join(' ')}; roles: ${S.roles.map(r => `<code>${r.id}</code>`).join(' ')}.</p>
+      <div id="peopleRows">${people.map(row).join('') || ''}</div>
+      <button type="button" class="btn sm" data-person-add>+ Add person</button>
+    </div>
+    <div class="m-foot"><span></span><div class="card-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Save</button></div></div>
+  </form>`;
+  if (!people.length) $('#peopleRows').insertAdjacentHTML('beforeend', row());
+  dlg.showModal();
+  dlg.onclick = e => {
+    if (e.target.closest('[data-person-add]')) return $('#peopleRows').insertAdjacentHTML('beforeend', row());
+    const rmv = e.target.closest('[data-person-remove]');
+    if (rmv) rmv.closest('.person-row').remove();
+  };
+  $('#cfgForm').addEventListener('submit', async e => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    e.preventDefault();
+    const list = [...document.querySelectorAll('#peopleRows .person-row')].map(r => {
+      const v = n => r.querySelector(`[name=${n}]`);
+      return { name: v('name').value, title: v('title').value, company: v('company').value, email: v('email').value, teams: v('teams').value,
+        hours: v('hours').value, projects: v('projects').value, roles: v('roles').value, skills: v('skills').value, contractor: v('contractor').checked };
+    }).filter(x => x.name.trim());
+    try {
+      await api('/api/people', { method: 'PUT', body: { people: list } });
+      toast(`Saved ${list.length} ${list.length === 1 ? 'person' : 'people'}`);
+      dlg.close();
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 /* ---------------- housekeeping ---------------- */
@@ -1032,8 +1233,10 @@ function openAssign(pre = {}) {
   const dlg = $('#assignDlg');
   const r0 = route();
   const projectId = pre.projectId || (r0.view === 'project' ? r0.id : (S.projects[0] || {}).id);
-  const role = pre.role || 'backend';
+  const crew0 = crewRoles(projOf(projectId));
+  const role = pre.role && crew0.some(r => r.id === pre.role) ? pre.role : (crew0.find(r => r.id === 'backend') || crew0[0] || { id: 'backend' }).id;
   const mode = pre.mode || roleOf(role).defaultMode || 'change';
+  const rolePick = (pid, sel) => crewRoles(projOf(pid)).map(r => `<label style="--rc:${r.color}"><input type="radio" name="role" value="${r.id}" ${r.id === sel ? 'checked' : ''}><span class="sw"></span>${esc(r.name)}</label>`).join('');
   dlg.innerHTML = `<form method="dialog" id="assignForm">
     <div class="m-head"><h2>Assign a task</h2><button class="icon-btn" value="cancel" formnovalidate aria-label="Close">✕</button></div>
     <div class="m-body">
@@ -1041,7 +1244,7 @@ function openAssign(pre = {}) {
         <select name="projectId">${S.projects.map(p => `<option value="${p.id}" ${p.id === projectId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <label class="check plan-first"><input type="checkbox" name="plan"> <span><b>Plan it first</b> · the Solutions Architect breaks this feature into linked tasks for the crew. You review the plan, then start it.</span></label>
       <div class="field not-planning"><label>Who</label>
-        <div class="role-pick">${S.roles.map(r => `<label style="--rc:${r.color}"><input type="radio" name="role" value="${r.id}" ${r.id === role ? 'checked' : ''}><span class="sw"></span>${esc(r.name)}</label>`).join('')}</div></div>
+        <div class="role-pick" id="rolePick">${rolePick(projectId, role)}</div></div>
       <div class="field not-planning"><label>Kind of task</label>
         <div class="mode-pick">
           <label><input type="radio" name="mode" value="change" ${mode === 'change' ? 'checked' : ''}><b>Make changes</b><span>Works on its own new branch and commits. Never pushes.</span></label>
@@ -1170,7 +1373,8 @@ function openAssign(pre = {}) {
     const on = F.plan.checked;
     form.classList.toggle('planning', on);
     if (on) {
-      form.querySelector('input[name=role][value=architect]').checked = true;
+      const arch = form.querySelector('input[name=role][value=architect]');
+      if (arch) arch.checked = true; // the server gives plans to the Architect either way
       form.querySelector('input[name=mode][value=analyze]').checked = true;
     }
     F.title.placeholder = on ? 'e.g. Let users export validation results to Excel' : 'e.g. Add pagination to GET /invoices';
@@ -1183,15 +1387,25 @@ function openAssign(pre = {}) {
   F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
   F.timeoutMin.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
   F.model.addEventListener('change', () => { markStale(); fillLimits(); });
-  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); markStale(); fillLimits(); });
+  F.projectId.addEventListener('change', () => {
+    pre = {};
+    // Only this project's roles; keep the chosen role when the new project has it.
+    const keep = F.role.value;
+    const crew = crewRoles(projOf(F.projectId.value));
+    const sel = F.plan.checked ? 'architect' : crew.some(r => r.id === keep) ? keep : (crew[0] || {}).id;
+    $('#rolePick').innerHTML = rolePick(F.projectId.value, sel);
+    fillRepos(); markStale(); fillLimits();
+  });
   F.repo.addEventListener('change', fillBranches);
   form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); markStale(); fillLimits(); }));
-  form.querySelectorAll('input[name=role]').forEach(i => i.addEventListener('change', () => {
+  // Delegated: the role buttons are rebuilt when the project changes.
+  form.addEventListener('change', e => {
+    if (e.target.name !== 'role') return;
     if (!modeTouched) form.querySelector(`input[name=mode][value=${roleOf(F.role.value).defaultMode}]`).checked = true;
     fillRepos();
     markStale();
     fillLimits();
-  }));
+  });
   form.addEventListener('submit', async e => {
     if (e.submitter && e.submitter.value === 'cancel') return;
     e.preventDefault();
@@ -1245,6 +1459,13 @@ document.addEventListener('click', async e => {
     }
   }
   if (e.target.closest('[data-housekeeping]')) { $('#sidebar').classList.remove('open'); return openHousekeeping(); }
+  const ep = e.target.closest('[data-edit-project],[data-add-project],[data-people]');
+  if (ep) {
+    e.preventDefault();
+    $('#sidebar').classList.remove('open');
+    if (ep.dataset.people !== undefined) return openPeople();
+    return openProjectEditor(ep.dataset.editProject || null);
+  }
   const hk = e.target.closest('[data-hk]');
   if (hk) return housekeepingAction(hk.dataset.hk);
   // Handoff and plan buttons in the task drawer.

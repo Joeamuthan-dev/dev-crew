@@ -40,9 +40,16 @@ npm install -g @anthropic-ai/claude-code
 claude          # log in once, then exit
 ```
 
-Copy this `dev-crew` folder to the laptop, then tell it where your projects are. Copy
-`crew.config.json` to **`crew.config.local.json`**; that file is yours and wins over the
-shipped one. Edit it like this:
+Copy this `dev-crew` folder to the laptop, set `settings.workspace` (the folder that holds your
+projects) and run `npm start`. Then press **+ Add project** in the sidebar: pick a folder and Dev
+Crew finds its git repos, detects the stack (.NET and its packages, Node frameworks, Java, Python,
+Go, Docker, pipelines, Terraform, migrations…), suggests which roles the project needs and drafts
+its context from the README or an overview doc. Check the suggestions and save. **Edit project**
+on a project's page changes it later, and **People** at the bottom of the sidebar edits who to ask.
+
+Everything is saved to **`crew.config.local.json`** (yours; it wins over the shipped
+`crew.config.json`). Each save is validated first, and the previous version is kept in
+`data/config-backups` (the last 10). You can still edit the file by hand; it looks like this:
 
 ```json
 {
@@ -80,6 +87,8 @@ shipped one. Edit it like this:
 | `roles.<role>.notes` | Standing instructions for that role on that project. |
 | `roles.<role>.model` | `sonnet`, `opus` or `haiku` for that role (a task can still override it). |
 | `allowCommands` | Extra command prefixes the agents may run in that project. |
+| `activeRoles` | The roles the project uses (default: all six). The others get no desk, are left out of the dialogs, and agents are told the project has no such role, so they never hand work to it. |
+| `handoffs`, `limits` | Per-project overrides of the app settings (see *Handoffs and plans* and *Estimates and limits*). |
 
 Role ids: `architect`, `frontend`, `backend`, `database`, `qa`, `devops`.
 
