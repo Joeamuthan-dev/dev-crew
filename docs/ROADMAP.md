@@ -92,7 +92,14 @@ next role starts. This only happens when it's needed.
 - **Guards:** at most 5 handoffs in a chain. A role can't hand off to itself twice in a row.
   Every handoff is shown in a **pipeline view** (parent → children, with status).
 
-## 3. Housekeeping and pruning
+## 3. Housekeeping and pruning — done on `feature/housekeeping`
+
+Built as planned: `lib/housekeeping.mjs` decides (pure, unit tested), `lib/cleanup.mjs` gathers git
+facts and acts, re-checking each step. Testing found and fixed two real issues: paths of the same
+folder written differently on Windows (8.3 short names, case, slashes) made live worktrees look like
+orphans, so paths are now compared in canonical form and a folder with uncommitted work is never
+treated as an orphan; and branches checked out in another Dev Crew copy's worktree are now kept.
+Log compression was dropped: logs are moved to `data/archive/logs/` instead.
 
 **Goal:** Dev Crew cleans up what's no longer needed, and always shows what it will remove first.
 
