@@ -69,6 +69,14 @@ function connect() {
     }
     if (drawer && drawer.id === l.id) appendLog([l]);
   });
+  // Queue ETAs and today's spend, re-sent whenever a task or report changes (and every 30s).
+  es.addEventListener('queue', e => {
+    const q = JSON.parse(e.data);
+    S.etas = q.etas;
+    S.spend = q.spend;
+    schedule();
+    if (drawer) refreshDrawer();
+  });
   es.addEventListener('reload', () => load());
   es.addEventListener('monday', () => load());
 }
@@ -101,6 +109,32 @@ function ago(ms) {
 const fmtTime = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const money = n => (n ? `$${n.toFixed(2)}` : '');
 
+/** 90000 -> "2m", 5400000 -> "1h 30m". */
+function dur(ms) {
+  const m = Math.max(1, Math.round((ms || 0) / 60000));
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
+}
+
+/** "starts in 4m", "~3m left", "waiting: daily limit" for a queued or running task. */
+function etaText(t) {
+  const e = S.etas && S.etas[t.id];
+  const now = Date.now();
+  if (t.status === 'queued') {
+    if (!e) return S.spend && S.spend.paused ? 'waiting: daily spend limit reached' : '';
+    return e.start - now < 60000 ? `starts now · ~${dur(e.end - e.start)}` : `starts in ${dur(e.start - now)} · ~${dur(e.end - e.start)}`;
+  }
+  if (t.status === 'running' && e) return e.end - now <= 60000 ? 'finishing soon' : `~${dur(e.end - now)} left`;
+  return '';
+}
+
+/** "4–7m · $0.30–$0.60" from an estimate's 25th–75th percentiles. */
+function estRange(est) {
+  const c = est.costUsd;
+  const cost = c.p75 < 0.01 ? '<$0.01' : `$${c.p25.toFixed(2)}–$${c.p75.toFixed(2)}`;
+  return `${dur(est.wallMs.p25)}–${dur(est.wallMs.p75)} · ${cost}`;
+}
+
 function roleChip(roleId, cls = '') {
   const r = roleOf(roleId);
   return `<span class="role-chip ${cls}" style="--rc:${r.color}" title="${esc(r.name)}">${esc(r.short)}</span>`;
@@ -110,6 +144,7 @@ function statusPill(t) {
   if (t.status === 'running') return '<span class="pill blue">Working</span>';
   if (t.status === 'queued') return '<span class="pill blue">Queued</span>';
   if (t.status === 'failed') return '<span class="pill red">Failed</span>';
+  if (t.status === 'stopped') return `<span class="pill amber" title="${esc(t.error || '')}">Stopped · ${t.stopReason === 'budget' ? 'cost limit' : 'time limit'}</span>`;
   if (t.status === 'cancelled') return '<span class="pill">Cancelled</span>';
   if (needsReview(t)) return '<span class="pill amber">Review</span>';
   return '<span class="pill green">Done</span>';
@@ -227,13 +262,15 @@ function renderTop() {
   const running = S.tasks.filter(t => t.status === 'running').length + S.reports.filter(r => r.status === 'running').length;
   const queued = S.tasks.filter(t => t.status === 'queued').length + S.reports.filter(r => r.status === 'queued').length;
   const review = S.tasks.filter(needsReview).length;
-  const spent = S.tasks.filter(t => isToday(t.startedAt)).reduce((a, t) => a + (t.costUsd || 0), 0)
-    + S.reports.filter(r => isToday(r.startedAt)).reduce((a, r) => a + (r.costUsd || 0), 0);
+  const sp = S.spend || { today: 0, daily: 0, state: 'ok' };
+  const spendTitle = sp.paused
+    ? 'Daily spend limit reached: queued runs wait until tomorrow or until the limit is raised'
+    : 'API-equivalent cost reported by Claude Code, against your daily limit';
   $('#topStats').innerHTML = `
     <span><b>${running}</b> working</span>
     <span><b>${queued}</b> queued</span>
     <span><b>${review}</b> to review</span>
-    ${spent ? `<span title="API-equivalent cost reported by Claude Code"><b>${money(spent)}</b> today</span>` : ''}`;
+    <span class="spend ${sp.state}" title="${spendTitle}"><b>$${sp.today.toFixed(2)}</b>${sp.daily ? ` / $${sp.daily}` : ''} today${sp.paused ? ' · paused' : ''}</span>`;
 }
 
 function renderSidebar() {
@@ -613,7 +650,8 @@ function todayView() {
 function taskRow(t, showProject) {
   const p = projOf(t.projectId);
   const where = t.mode === 'change' ? (t.branch || `${t.repo} · new branch`) : `${t.repo === '*' ? 'whole project' : t.repo} · read-only`;
-  const live = t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '';
+  const eta = etaText(t);
+  const live = (eta ? ` · ${eta}` : '') + (t.status === 'running' && activity[t.id] ? ` — ${activity[t.id]}` : '');
   return `<div class="row" data-task="${t.id}">
     <div>${roleChip(t.role)}</div>
     <div style="min-width:0">
@@ -766,7 +804,9 @@ function refreshDrawer(first) {
       ${t.branch ? `<dt>Branch</dt><dd><code>${esc(t.branch)}</code> from <code>${esc(t.base)}</code></dd>` : t.base ? `<dt>Base</dt><dd><code>${esc(t.base)}</code></dd>` : ''}
       ${t.worktree ? `<dt>Worktree</dt><dd>${t.cleaned ? '<i>removed (branch kept)</i>' : `<code>${esc(t.worktree)}</code>`}</dd>` : ''}
       <dt>Assigned</dt><dd>${fmtTime(t.createdAt)}${t.endedAt ? ` · finished ${ago(t.endedAt)}` : ''}</dd>
-      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.model ? ' · ' + esc(t.model) : ''}</dd>` : ''}
+      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.wallMs ? ' · ' + dur(t.wallMs) : ''}${t.model ? ' · ' + esc(t.model) : ''}${t.tokens ? ` · ${(t.tokens.input + t.tokens.output + t.tokens.cacheRead + t.tokens.cacheWrite).toLocaleString()} tokens` : ''}</dd>` : ''}
+      ${t.estimate ? `<dt>Estimate</dt><dd>${estRange(t.estimate)} <span style="color:var(--faint)">${t.estimate.basis === 'default' ? '(rough)' : `(from ${t.estimate.samples} past runs)`}</span>${etaText(t) ? ' · ' + esc(etaText(t)) : ''}</dd>` : ''}
+      ${t.appliedLimits || t.limits ? (() => { const l = t.appliedLimits || {}; const parts = [l.taskBudgetUsd ? `$${l.taskBudgetUsd} per run` : '', l.taskTimeoutMin ? `${l.taskTimeoutMin} min per run` : ''].filter(Boolean); return parts.length ? `<dt>Limits</dt><dd>${parts.join(' · ')}</dd>` : ''; })() : ''}
     </dl>
     ${t.details ? `<div class="d-section"><h4>Details</h4><div class="box md">${md(t.details)}</div></div>` : ''}
     ${t.error && t.status !== 'done' ? `<div class="d-section"><div class="err-box">${esc(t.error)}</div></div>` : ''}
@@ -782,7 +822,19 @@ function refreshDrawer(first) {
   const canFollow = !active && !t.cleaned;
   const foot = $('#dFoot');
   const draft = foot.querySelector('textarea') ? foot.querySelector('textarea').value : '';
+  // After a limit stopped the run, offer to resume the same session with raised limits. The one
+  // that was hit is suggested at double; the other keeps its value.
+  const al = t.appliedLimits || {};
+  const keepBudget = foot.querySelector('#contBudget') ? foot.querySelector('#contBudget').value : '';
+  const keepTime = foot.querySelector('#contTime') ? foot.querySelector('#contTime').value : '';
+  const contRow = canFollow && t.status === 'stopped' ? `
+    <div class="continue-limits">
+      <span>Continue picks up where it stopped: same session, same branch, nothing redone. Limits for the next run:</span>
+      <label>$ <input type="number" id="contBudget" min="0" step="0.5" value="${esc(keepBudget || (t.stopReason === 'budget' ? (al.taskBudgetUsd || 2) * 2 : al.taskBudgetUsd ?? ''))}"></label>
+      <label><input type="number" id="contTime" min="0" step="5" value="${esc(keepTime || (t.stopReason === 'timeout' ? (al.taskTimeoutMin || 30) * 2 : al.taskTimeoutMin ?? ''))}"> min</label>
+    </div>` : '';
   foot.innerHTML = `
+    ${contRow}
     ${canFollow ? `<textarea id="followText" rows="2" placeholder="Follow up with the ${esc(r.name)}: ask a question, request changes, or say “continue”…"></textarea>` : ''}
     <div class="acts">
       <div class="card-actions">
@@ -790,6 +842,7 @@ function refreshDrawer(first) {
         ${!active && t.worktree && !t.cleaned ? '<button class="btn" data-task-act="cleanup" title="Delete the worktree folder; the branch stays in the repo">Remove worktree</button>' : ''}
         ${!active ? '<button class="btn ghost danger" data-task-act="delete">Delete</button>' : ''}
       </div>
+      ${canFollow && t.status === 'stopped' ? '<button class="btn" data-task-act="continue" title="Resume the same session with a new allowance">Continue</button>' : ''}
       ${canFollow ? '<button class="btn primary" data-task-act="followup">Send follow-up</button>' : ''}
     </div>`;
   const ta = foot.querySelector('textarea');
@@ -819,6 +872,15 @@ async function taskAction(act) {
       await api(`/api/tasks/${id}/followup`, { method: 'POST', body: { text } });
       $('#followText').value = '';
       toast('Sent — the agent picks it up next');
+    } else if (act === 'continue') {
+      const extra = (($('#followText') || {}).value || '').trim();
+      await api(`/api/tasks/${id}/followup`, { method: 'POST', body: {
+        text: `Continue where you stopped: the last run hit a limit. Do not start over; pick up from your last step, finish the task and give the usual report.${extra ? `\n\nAlso from the owner: ${extra}` : ''}`,
+        budgetUsd: ($('#contBudget') || {}).value,
+        timeoutMin: ($('#contTime') || {}).value,
+      } });
+      if ($('#followText')) $('#followText').value = '';
+      toast('Continuing from where it stopped');
     } else if (act === 'cancel') {
       await api(`/api/tasks/${id}/cancel`, { method: 'POST' });
     } else if (act === 'cleanup') {
@@ -865,6 +927,16 @@ function openAssign(pre = {}) {
         <textarea name="details" rows="4" placeholder="Acceptance criteria, ticket text, links, constraints…">${esc(pre.details || '')}</textarea></div>
       <div class="field"><label>Model</label>
         <select name="model"><option value="">Default (${esc(S.settings.model)})</option><option value="sonnet">Sonnet</option><option value="opus">Opus — hardest tasks</option><option value="haiku">Haiku — quick, cheap</option></select></div>
+      <div class="estimate">
+        <div class="est-head"><button type="button" class="btn sm" id="estBtn">Estimate ETA</button><span class="faint" id="estHint">Type the task, then check how long it should take.</span></div>
+        <div id="estBox" aria-live="polite"></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>Cost limit per run <span style="font-weight:400;color:var(--faint)">(USD, 0 = none)</span></label>
+          <input type="number" name="budgetUsd" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label>Time limit per run <span style="font-weight:400;color:var(--faint)">(minutes, 0 = none)</span></label>
+          <input type="number" name="timeoutMin" min="0" step="5" inputmode="numeric"></div>
+      </div>
     </div>
     <div class="m-foot">
       <label class="check"><input type="checkbox" name="more"> Keep open to assign another</label>
@@ -896,12 +968,86 @@ function openAssign(pre = {}) {
         || '<option value="">Current branch</option>';
     } catch { /* keep the default */ }
   };
-  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); });
+  // Default limits follow the project / role until the owner edits them. The estimate is on
+  // demand: Estimate ETA sends the typed task, and the answer is marked stale once anything that
+  // feeds it changes.
+  let limitsTouched = false;
+  let estSeq = 0;
+  let lastEst = null;
+  const fillLimits = async () => {
+    if (limitsTouched) return;
+    const q = new URLSearchParams({ project: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value });
+    try {
+      const e = await api(`/api/estimate?${q}`);
+      if (!limitsTouched) { F.budgetUsd.value = e.limits.taskBudgetUsd; F.timeoutMin.value = e.limits.taskTimeoutMin; }
+    } catch { /* leave the fields blank: the server applies the defaults */ }
+  };
+  const markStale = () => {
+    if (!lastEst) return;
+    lastEst = null;
+    $('#estBox').classList.add('stale');
+    $('#estHint').textContent = 'The task changed since this estimate. Press Estimate ETA again.';
+  };
+  // Warn when a typical run of this kind would not fit inside the limits as set.
+  const checkLimitFit = e => {
+    const el = $('#estWarn');
+    if (!el || !e) return;
+    const budget = Number(F.budgetUsd.value) || 0;
+    const mins = Number(F.timeoutMin.value) || 0;
+    const warn = [];
+    if (budget && e.estimate.costUsd.p75 > budget) warn.push(`may hit the $${budget} cost limit`);
+    if (mins && e.estimate.wallMs.p75 > mins * 60000) warn.push(`may hit the ${mins}-minute time limit`);
+    el.innerHTML = warn.length ? `<b class="warn">Runs like this ${warn.join(' and ')}. Raise the limit or pick a cheaper model.</b>` : '';
+  };
+  const SIZE_WORDS = { small: 'looks like a small task', large: 'looks like a larger task', xlarge: 'looks like a big task' };
+  const runEstimate = async () => {
+    if (!F.title.value.trim()) { F.title.focus(); return toast('Type the task first', true); }
+    const seq = ++estSeq;
+    const btn = $('#estBtn');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    try {
+      const e = await api('/api/estimate', { method: 'POST', body: {
+        projectId: F.projectId.value, role: F.role.value, mode: F.mode.value, model: F.model.value,
+        title: F.title.value, details: F.details.value,
+      } });
+      if (seq !== estSeq) return;
+      const est = e.estimate;
+      const basis = est.basis === 'similar'
+        ? `based on ${est.samples} similar past tasks`
+        : est.basis === 'default'
+          ? `rough: no past runs of this kind yet${SIZE_WORDS[est.size] ? `, and it ${SIZE_WORDS[est.size]}` : ''}`
+          : `from ${est.samples} past ${est.basis === 'project-role' ? 'runs by this role on this project' : est.basis === 'role' ? 'runs by this role' : 'runs of this kind'}${SIZE_WORDS[est.size] ? `; it ${SIZE_WORDS[est.size]}` : ''}`;
+      const when = e.spend.paused
+        ? '<b class="warn">Waits: today\'s spend limit is reached</b>'
+        : e.eta ? (e.eta.start - Date.now() < 60000 ? 'Starts now' : `Starts in ~${dur(e.eta.start - Date.now())}`) + ` · done by ~${new Date(e.eta.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+      const box = $('#estBox');
+      box.classList.remove('stale');
+      box.innerHTML = `<div><b>≈ ${estRange(est)}</b> · ${esc(e.model)}</div><div>${when}</div><div class="faint">${esc(basis)}</div><div id="estWarn"></div>`;
+      $('#estHint').textContent = 'Approximate. Real runs vary.';
+      lastEst = e;
+      checkLimitFit(e);
+    } catch (err) {
+      if (seq === estSeq) $('#estBox').textContent = `No estimate: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Estimate ETA';
+    }
+  };
+  $('#estBtn').addEventListener('click', runEstimate);
+  F.title.addEventListener('input', markStale);
+  F.details.addEventListener('input', markStale);
+  F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
+  F.timeoutMin.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
+  F.model.addEventListener('change', () => { markStale(); fillLimits(); });
+  F.projectId.addEventListener('change', () => { pre = {}; fillRepos(); markStale(); fillLimits(); });
   F.repo.addEventListener('change', fillBranches);
-  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); }));
+  form.querySelectorAll('input[name=mode]').forEach(i => i.addEventListener('change', () => { modeTouched = true; fillRepos(); markStale(); fillLimits(); }));
   form.querySelectorAll('input[name=role]').forEach(i => i.addEventListener('change', () => {
     if (!modeTouched) form.querySelector(`input[name=mode][value=${roleOf(F.role.value).defaultMode}]`).checked = true;
     fillRepos();
+    markStale();
+    fillLimits();
   }));
   form.addEventListener('submit', async e => {
     if (e.submitter && e.submitter.value === 'cancel') return;
@@ -912,7 +1058,7 @@ function openAssign(pre = {}) {
     try {
       await api('/api/tasks', { method: 'POST', body });
       toast(`Assigned to ${roleOf(body.role).name}`);
-      if (F.more.checked) { F.title.value = ''; F.details.value = ''; F.title.focus(); }
+      if (F.more.checked) { F.title.value = ''; F.details.value = ''; markStale(); F.title.focus(); }
       else dlg.close();
     } catch (err) {
       toast(err.message, true);
@@ -921,6 +1067,7 @@ function openAssign(pre = {}) {
     }
   });
   fillRepos();
+  fillLimits();
   dlg.showModal();
   F.title.focus();
 }

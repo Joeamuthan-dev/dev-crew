@@ -12,6 +12,7 @@ import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
 import { search as searchPeople, directory, contactsFor } from './lib/people.mjs';
 import { checkRequest } from './lib/guard.mjs';
+import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
 
 const DATA = path.join(ROOT, 'data');
 const WT_DIR = path.join(DATA, 'worktrees');
@@ -50,8 +51,20 @@ function emit(type, data) {
 }
 setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 25000);
 
-function touchTask(t) { store.save(); emit('task', t); }
-function touchReport(r) { store.save(); emit('report', r); }
+function touchTask(t) { store.save(); emit('task', t); queueChanged(); }
+function touchReport(r) { store.save(); emit('report', r); queueChanged(); }
+
+// ETAs and spend depend on every job, so send them once after a burst of changes.
+let queueTimer = null;
+function queueChanged() {
+  if (queueTimer) return;
+  queueTimer = setTimeout(() => { queueTimer = null; emitQueue(); }, 200);
+}
+function emitQueue() {
+  if (!clients.size) return;
+  emit('queue', { etas: etas(), spend: spendView() });
+}
+setInterval(emitQueue, 30000);
 function log(id, kind, text) {
   const entry = { at: Date.now(), kind, text };
   store.appendLog(id, entry);
@@ -69,10 +82,86 @@ function nextJob() {
   return best;
 }
 
+/* ---------------- limits, estimates and ETA ---------------- */
+
+const jobModel = j => j.kind === 'report'
+  ? cfg.settings.reportModel || cfg.settings.model
+  : j.model || ((project(j.projectId) || { roles: {} }).roles[j.role] || {}).model || cfg.settings.model;
+
+const taskText = t => `${t.title || ''}\n${t.details || ''}`;
+
+/** Every finished run, with the task's project, role, mode and wording, to learn estimates from. */
+function runHistory() {
+  const out = [];
+  // Only a task's first run describes the task as typed; follow-ups are a different amount of work.
+  for (const t of S.tasks) for (const r of t.runs || []) out.push({ projectId: t.projectId, role: t.role, mode: t.mode, model: r.model, ok: r.ok, wallMs: r.wallMs, costUsd: r.costUsd, turns: r.turns, text: r.kind === 'task' ? taskText(t) : '' });
+  for (const rp of S.reports) for (const r of rp.runs || []) out.push({ projectId: rp.projectId, role: 'report', mode: 'report', model: r.model, ok: r.ok, wallMs: r.wallMs, costUsd: r.costUsd, turns: r.turns });
+  return out;
+}
+
+function estimateFor({ projectId, role, mode, model, text = '' }) {
+  return estimate(runHistory(), { projectId, role, mode, model, text });
+}
+
+function limitsFor(job) {
+  const p = project(job.projectId);
+  if (job.kind === 'report' || !job.role) return resolveLimits(cfg.settings.limits, p && p.limits);
+  return resolveLimits(cfg.settings.limits, p && p.limits, p && (p.roles[job.role] || {}).limits, job.limits);
+}
+
+const todaysSpend = () => spendToday([...S.tasks, ...S.reports]);
+
+/** True when today's spend has reached the daily limit: queued runs wait. */
+function dailyLimitReached() {
+  const daily = cfg.settings.limits.dailyBudgetUsd;
+  return daily > 0 && todaysSpend() >= daily;
+}
+
+function spendView() {
+  const today = todaysSpend();
+  const daily = cfg.settings.limits.dailyBudgetUsd;
+  return { today, daily, state: limitState(today, daily, cfg.settings.limits.warnAt), paused: dailyLimitReached() };
+}
+
+function etas() {
+  // A task keeps the estimate made from its wording when it was assigned; reports use history.
+  const est = j => (j.kind === 'task' && j.estimate ? j.estimate : estimateFor({ projectId: j.projectId, role: j.role, mode: j.mode || 'report', model: jobModel(j), text: j.kind === 'task' ? taskText(j) : '' })).wallMs.p50;
+  const jobs = [...S.tasks.map(t => ({ ...t, kind: 'task' })), ...S.reports.map(r => ({ ...r, kind: 'report', mode: 'report' }))];
+  return queueEta({
+    now: Date.now(),
+    slots: cfg.settings.maxConcurrent,
+    paused: dailyLimitReached(),
+    running: jobs.filter(j => j.status === 'running').map(j => ({ id: j.id, startedAt: j.startedAt, estMs: est(j) })),
+    queued: jobs.filter(j => j.status === 'queued').sort((a, b) => a.queuedAt - b.queuedAt).map(j => ({ id: j.id, estMs: est(j) })),
+  });
+}
+
+/** Stops a run at its time limit, with a warning in the log first. Returns a cancel function. */
+function watchTimeout(job, limits, handle) {
+  const ms = limits.taskTimeoutMin * 60000;
+  if (!ms) return () => {};
+  const warn = setTimeout(() => log(job.id, 'warn', `${Math.round(limits.warnAt * 100)}% of the ${limits.taskTimeoutMin}-minute time limit used.`), ms * limits.warnAt);
+  const stop = setTimeout(() => {
+    handle.limitHit = 'timeout';
+    log(job.id, 'warn', `Time limit reached (${limits.taskTimeoutMin} min). Stopping the run.`);
+    if (handle.kill) handle.kill();
+  }, ms);
+  return () => { clearTimeout(warn); clearTimeout(stop); };
+}
+
+let budgetNoticeDay = '';
 function pump() {
   while (running.size < Math.max(1, cfg.settings.maxConcurrent)) {
     const next = nextJob();
     if (!next) return;
+    if (dailyLimitReached()) {
+      if (budgetNoticeDay !== todayStr()) {
+        budgetNoticeDay = todayStr();
+        console.log(`Daily spend limit ($${cfg.settings.limits.dailyBudgetUsd}) reached: queued runs wait until tomorrow or until the limit is raised.`);
+        emitQueue();
+      }
+      return;
+    }
     const handle = { kill: null, cancelled: false };
     running.set(next.job.id, handle);
     next.job.status = 'running';
@@ -146,6 +235,11 @@ async function execTask(t, handle) {
     if (followup) log(t.id, 'you', followup);
 
     const model = t.model || (p.roles[t.role] || {}).model || cfg.settings.model;
+    const limits = limitsFor(t);
+    t.appliedLimits = limits;
+    if (limits.taskBudgetUsd > 0 && !(await claudeFeatures(cfg.settings.claudeCommand)).maxBudget) {
+      log(t.id, 'warn', 'This Claude Code version has no --max-budget-usd, so the per-task cost limit cannot be enforced. Update with: claude update');
+    }
     const run = runClaude({
       command: cfg.settings.claudeCommand,
       cwd,
@@ -159,6 +253,7 @@ async function execTask(t, handle) {
       permissionMode: cfg.settings.permissionMode,
       strictMcp: cfg.settings.strictMcp,
       inheritEnv: cfg.settings.inheritClaudeEnv,
+      maxBudgetUsd: limits.taskBudgetUsd,
       tmpDir: TMP,
       onEvent: ev => {
         if (ev.type === 'system' && ev.session_id && ev.session_id !== t.sessionId) { t.sessionId = ev.session_id; store.save(); }
@@ -167,7 +262,9 @@ async function execTask(t, handle) {
     });
     handle.kill = run.kill;
     if (handle.cancelled) run.kill();
-    const res = await run.done;
+    const unwatch = watchTimeout(t, limits, handle);
+    const res = await run.done.finally(unwatch);
+    if (res.budgetHit) handle.limitHit = 'budget';
 
     if (res.sessionId) t.sessionId = res.sessionId;
     t.costUsd = (t.costUsd || 0) + res.costUsd;
@@ -183,7 +280,16 @@ async function execTask(t, handle) {
       (t.history = t.history || []).push({ at: Date.now(), prompt: followup || t.title, result: res.result });
     }
     if (t.mode === 'change' && t.baseSha) t.git = await G.branchSummary(repo.path, t.baseSha, t.branch, t.worktree);
+    t.stopReason = '';
     if (handle.cancelled) { t.status = 'cancelled'; t.error = 'Cancelled.'; }
+    else if (handle.limitHit) {
+      t.status = 'stopped';
+      t.stopReason = handle.limitHit;
+      t.error = handle.limitHit === 'budget'
+        ? `Stopped at the $${limits.taskBudgetUsd} cost limit for this run. Press Continue to resume with a new allowance.`
+        : `Stopped at the ${limits.taskTimeoutMin}-minute time limit for this run. Press Continue to resume.`;
+      log(t.id, 'warn', t.error);
+    }
     else if (res.ok) t.status = 'done';
     else { t.status = 'failed'; t.error = res.error; log(t.id, 'err', res.error); }
   } catch (e) {
@@ -217,6 +323,7 @@ async function execReport(r, handle) {
     })) : [];
     log(r.id, 'sys', `Gathered ${tasks.length} task(s), ${tickets.length} open ticket(s) and activity from ${repos.length} repo(s)`);
 
+    const limits = limitsFor({ ...r, kind: 'report' });
     const run = runClaude({
       command: cfg.settings.claudeCommand,
       cwd: p.path,
@@ -228,16 +335,24 @@ async function execReport(r, handle) {
       permissionMode: cfg.settings.permissionMode,
       strictMcp: cfg.settings.strictMcp,
       inheritEnv: cfg.settings.inheritClaudeEnv,
+      maxBudgetUsd: limits.taskBudgetUsd,
       tmpDir: TMP,
       onEvent: ev => { for (const l of describeEvent(ev, p.path)) if (l.kind !== 'say') log(r.id, l.kind, l.text); },
     });
     handle.kill = run.kill;
     if (handle.cancelled) run.kill();
-    const res = await run.done;
+    const unwatch = watchTimeout(r, limits, handle);
+    const res = await run.done.finally(unwatch);
+    if (res.budgetHit) handle.limitHit = 'budget';
     r.costUsd = res.costUsd;
     recordRun(r, res, cfg.settings.reportModel || cfg.settings.model, 'report');
-    if (res.ok) {
+    if (res.ok && !handle.limitHit) {
       Object.assign(r, parseReport(res.result), { status: 'done' });
+    } else if (handle.limitHit && !handle.cancelled) {
+      r.status = 'stopped';
+      r.error = handle.limitHit === 'budget'
+        ? `Stopped at the $${limits.taskBudgetUsd} cost limit. Run the stand-up again, or raise the limit.`
+        : `Stopped at the ${limits.taskTimeoutMin}-minute time limit. Run the stand-up again, or raise the limit.`;
     } else {
       r.status = handle.cancelled ? 'cancelled' : 'failed';
       r.error = res.error;
@@ -293,6 +408,8 @@ function checkDaily() {
   queueReports(null, 'scheduled');
 }
 setInterval(checkDaily, 30000);
+// Picks up runs held back by the daily limit once the day rolls over or the limit is raised.
+setInterval(() => pump(), 60000);
 
 /* ---------------- HTTP ---------------- */
 
@@ -306,7 +423,10 @@ async function stateView() {
     settings: {
       model: cfg.settings.model, reportModel: cfg.settings.reportModel, maxConcurrent: cfg.settings.maxConcurrent,
       dailyReport: cfg.settings.dailyReport, workspacePath: cfg.settings.workspacePath, configFile: path.basename(cfg.file),
+      limits: cfg.settings.limits,
     },
+    spend: spendView(),
+    etas: etas(),
     problems: cfg.problems,
     claude: await claudeFeatures(cfg.settings.claudeCommand),
     roles: ROLES.map(({ prompt, ...r }) => r),
@@ -358,11 +478,16 @@ async function createTask(b) {
     const ups = (d.updates || []).map(u => `- ${u.by || 'someone'}: ${u.text.replace(/\s+/g, ' ')}`).join('\n');
     details = `monday.com ticket "${d.name}"${d.url ? ` (${d.url})` : ''}\n${cols}${ups ? `\n\nLatest updates on the ticket:\n${ups}` : ''}${details ? `\n\nFrom the owner:\n${details}` : ''}`;
   }
+  const model = String(b.model || '');
+  // Per-task overrides from the Assign dialog; blank fields fall back to role/project/app limits.
+  const limits = cleanLimits({ taskBudgetUsd: b.budgetUsd, taskTimeoutMin: b.timeoutMin });
   const t = {
     id: newId('t'), projectId: p.id, role: b.role, mode, repo: repoName, base: String(b.base || '').trim(),
-    title: title.slice(0, 200), details, model: String(b.model || ''), ticket,
+    title: title.slice(0, 200), details, model, ticket, limits,
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
   };
+  // Kept so the cost page can later compare what we expected with what happened.
+  t.estimate = estimateFor({ projectId: p.id, role: t.role, mode, model: jobModel(t), text: taskText(t) });
   S.tasks.unshift(t);
   touchTask(t);
   pump();
@@ -384,6 +509,27 @@ async function route(req, res, url) {
   }
 
   if (m === 'GET' && parts[1] === 'log' && parts[2]) return send(res, 200, store.readLog(parts[2]));
+
+  // GET ?project&role&mode&model gives the default limits and a role-level estimate; POST with the
+  // typed title and details (the dialog's Estimate ETA button) estimates that particular task.
+  if ((m === 'GET' || m === 'POST') && url.pathname === '/api/estimate') {
+    const q = url.searchParams;
+    const b = m === 'POST' ? await readBody(req) : {};
+    const p = project(b.projectId || q.get('project'));
+    if (!p) return send(res, 404, { error: 'Unknown project.' });
+    const role = b.role || q.get('role');
+    const mode = (b.mode || q.get('mode')) === 'analyze' ? 'analyze' : 'change';
+    const model = b.model || q.get('model') || (p.roles[role] || {}).model || cfg.settings.model;
+    const text = `${String(b.title || '').slice(0, 200)}\n${String(b.details || '').slice(0, 8000)}`.trim();
+    const est = estimateFor({ projectId: p.id, role, mode, model, text });
+    const limits = resolveLimits(cfg.settings.limits, p.limits, (p.roles[role] || {}).limits);
+    // When would a task assigned now start and finish? Simulate it at the back of the queue.
+    const probe = { id: '__probe', projectId: p.id, role, mode, model, status: 'queued', queuedAt: Date.now(), estimate: est };
+    S.tasks.push(probe);
+    let eta;
+    try { eta = etas().__probe || null; } finally { S.tasks.pop(); }
+    return send(res, 200, { estimate: est, limits, model, eta, spend: { today: todaysSpend(), paused: dailyLimitReached() } });
+  }
 
   if (m === 'GET' && url.pathname === '/api/branches') {
     const p = project(url.searchParams.get('project'));
@@ -424,10 +570,17 @@ async function route(req, res, url) {
     if (!t) return send(res, 404, { error: 'No such task.' });
     const action = parts[3];
     if (m === 'POST' && action === 'followup') {
-      const { text } = await readBody(req);
+      const { text, budgetUsd, timeoutMin } = await readBody(req);
       if (!String(text || '').trim()) return send(res, 400, { error: 'Write the follow-up first.' });
       if (t.status === 'running' || t.status === 'queued') return send(res, 409, { error: 'The agent is still on this task. Wait for it to finish.' });
       if (t.cleaned) return send(res, 409, { error: 'This task\'s worktree was cleaned up. Assign a new task instead.' });
+      // Continuing after a limit: new limits apply to this and later runs of the task. The run
+      // resumes the same Claude session on the same branch, so no work is lost or redone.
+      const raised = cleanLimits({ taskBudgetUsd: budgetUsd, taskTimeoutMin: timeoutMin });
+      if (Object.keys(raised).length) {
+        t.limits = { ...(t.limits || {}), ...raised };
+        log(t.id, 'sys', `Limits for this task are now ${[raised.taskBudgetUsd !== undefined ? `$${raised.taskBudgetUsd} per run` : '', raised.taskTimeoutMin !== undefined ? `${raised.taskTimeoutMin} min per run` : ''].filter(Boolean).join(' and ')}.`);
+      }
       t.pendingFollowup = String(text).trim().slice(0, 8000);
       t.status = 'queued';
       t.queuedAt = Date.now();

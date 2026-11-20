@@ -42,7 +42,12 @@ These come from the code review and make the later phases safe and measurable.
 - **Tests:** `npm test` runs `node:test` unit tests for the guard, the environment filter and the
   run statistics.
 
-## 1. Run limits and ETA before starting
+## 1. Run limits and ETA before starting — done on `feature/run-limits-eta`
+
+Built as planned, in `lib/limits.mjs` (pure and unit tested). One deviation: the 80% warning is
+for the time limit only. Claude Code reports cost only when a run ends, so the per-task cost limit
+is enforced by Claude Code itself (`--max-budget-usd`) with no live warning. The daily limit warns
+at 80% in the top bar. Also added: a GitHub Actions workflow running `npm test` on Node 20 and 22.
 
 **Goal:** before a task starts you see an estimate (how long, how much it costs), and every run
 stops at a limit you set.

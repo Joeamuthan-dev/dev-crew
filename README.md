@@ -191,6 +191,33 @@ shows today's cost as Claude Code reports it. Sonnet is the default. Pick **Haik
 dialog for quick chores and **Opus** for hard ones. A stand-up is usually a few cents to a few
 tens of cents.
 
+### Estimates and limits
+
+Type the task in the Assign dialog and press **Estimate ETA** for an approximate time and cost
+for that task, when it would start given the queue, and when it should be done. The estimate uses,
+in order: past tasks with similar wording (three or more), past runs by that role on that project
+(five or more), then by that role, then of that kind. Without history it uses a rough default,
+scaled by what the wording suggests ("fix typo" is small; "refactor all services" is big), and
+says so. Editing the task greys the estimate out until you check again. Queued and running tasks
+show their ETA in the task lists.
+
+Every run stays inside limits. Set defaults in `settings.limits`, and override them per project
+(`projects[].limits`), per role (`projects[].roles.<role>.limits`) or per task in the dialog:
+
+```json
+"limits": { "taskBudgetUsd": 2, "taskTimeoutMin": 30, "dailyBudgetUsd": 20, "warnAt": 0.8 }
+```
+
+| Limit | What happens |
+|---|---|
+| `taskBudgetUsd` | Passed to Claude Code as `--max-budget-usd`; the run stops when it is reached. |
+| `taskTimeoutMin` | The server stops the run, with a warning in the log at `warnAt` (80%). |
+| `dailyBudgetUsd` | Once today's spend reaches it, queued runs wait until tomorrow or until you raise it. The top bar turns amber at 80% and red when reached. |
+
+`0` means no limit. A run stopped by a limit is marked **Stopped**, not failed. **Continue**
+resumes the same Claude session on the same branch, so it picks up from its last step instead of
+starting again; the task panel lets you raise the limit that was hit (it suggests double) first.
+
 ## Files
 
 ```

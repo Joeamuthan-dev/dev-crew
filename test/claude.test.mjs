@@ -46,6 +46,11 @@ test('runStats reads duration, tokens and models from a result event', () => {
   });
 });
 
+test('runStats lists the model that did the work first', () => {
+  const s = runStats({ modelUsage: { 'claude-haiku-x': { costUSD: 0.002 }, 'claude-sonnet-x': { costUSD: 0.08 } } }, 0, 1);
+  assert.deepEqual(s.models, ['claude-sonnet-x', 'claude-haiku-x']);
+});
+
 test('runStats copes with a missing result', () => {
   const s = runStats(null, 1000, 1500);
   assert.equal(s.wallMs, 500);
