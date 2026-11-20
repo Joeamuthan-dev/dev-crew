@@ -8,6 +8,7 @@ import { ROLES, roleById } from './lib/roles.mjs';
 import * as G from './lib/git.mjs';
 import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
 import { settingsFromForm, maskSettings } from './lib/settings.mjs';
+import { collectRuns, summarize, runsCsv, filterRows, dayKey } from './lib/analytics.mjs';
 import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseReport, summaryOf } from './lib/prompts.mjs';
 import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
@@ -466,6 +467,21 @@ setInterval(() => pump(), 60000);
 const ARCHIVE = path.join(DATA, 'archive');
 const LOGS = path.join(DATA, 'logs');
 let pruning = false;
+
+/** Tasks and stand-ups housekeeping moved to data/archive/YYYY-MM.json, for the Costs page. */
+function readArchive() {
+  const out = { tasks: [], reports: [] };
+  let files = [];
+  try { files = fs.readdirSync(ARCHIVE).filter(f => /^\d{4}-\d{2}\.json$/.test(f)); } catch { return out; }
+  for (const f of files) {
+    try {
+      const d = JSON.parse(fs.readFileSync(path.join(ARCHIVE, f), 'utf8'));
+      out.tasks.push(...(d.tasks || []));
+      out.reports.push(...(d.reports || []));
+    } catch { /* a damaged archive file is skipped */ }
+  }
+  return out;
+}
 
 async function housekeepingPreview() {
   for (const p of cfg.projects) refreshRepos(p);
@@ -949,6 +965,38 @@ async function route(req, res, url) {
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true });
+  }
+
+  // The Costs page: run data from live and archived tasks and stand-ups.
+  if (m === 'GET' && (url.pathname === '/api/analytics' || url.pathname === '/api/analytics.csv')) {
+    const q = url.searchParams;
+    const day = s => (/^\d{4}-\d{2}-\d{2}$/.test(s || '') ? s : undefined);
+    const filters = { from: day(q.get('from')), to: day(q.get('to')), projectId: q.get('project') || undefined, role: q.get('role') || undefined, model: q.get('model') || undefined };
+    const archived = readArchive();
+    const tasks = [...S.tasks, ...archived.tasks];
+    const rows = collectRuns({ tasks, reports: [...S.reports, ...archived.reports] });
+    const projectName = id => (project(id) || {}).name || id;
+    if (url.pathname.endsWith('.csv')) {
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="dev-crew-runs-${filters.from || 'all'}-to-${filters.to || dayKey(Date.now())}.csv"`,
+        'cache-control': 'no-store',
+      });
+      return res.end(runsCsv(filterRows(rows, filters), projectName));
+    }
+    const summary = summarize(rows, { ...filters, tasks, projectName, dailyLimit: cfg.settings.limits.dailyBudgetUsd });
+    const all = collectRuns({ tasks, reports: [] });
+    return send(res, 200, {
+      ...summary,
+      options: {
+        projects: cfg.projects.map(p => ({ id: p.id, name: p.name })),
+        roles: [...new Set([...ROLES.map(r => r.id), 'stand-up'])],
+        models: [...new Set(rows.map(r => r.model))].sort(),
+        firstDay: rows.length ? rows[0].day : dayKey(Date.now()),
+        hasArchive: archived.tasks.length + archived.reports.length > 0,
+        totalRuns: all.length,
+      },
+    });
   }
 
   // The Settings page. Secrets are never sent to the browser (maskSettings).
