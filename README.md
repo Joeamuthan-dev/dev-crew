@@ -133,6 +133,30 @@ as **Blocked**, and go back in the queue once it is done (for example after **Co
 
 The task panel's **Chain** section shows where a task came from and what came after it.
 
+## Housekeeping
+
+Press **Housekeeping** at the bottom of the sidebar. It shows what can go and why, before
+anything is removed; **Clean up** then does exactly that:
+
+- **Worktrees** of finished tasks: after `worktreeDays` (7), or as soon as the task's branch is
+  merged. The branch itself stays.
+- **Agent branches** (`agent/*`): deleted only when every commit on them is already in the branch
+  they started from (locally or on `origin`), so nothing is lost. Unmerged branches are listed as
+  kept, with how many commits are only on them.
+- **Old tasks and stand-ups**: after `taskDays` (30) they move to `data/archive/YYYY-MM.json`, with
+  their logs in `data/archive/logs/`. Archived, not deleted.
+- **Leftover worktree folders** that no task owns, and temp files from interrupted runs.
+
+Never touched: anything a queued, running or blocked task builds on; a worktree with uncommitted
+changes; a branch checked out anywhere (including another Dev Crew copy's worktree). Every step is
+checked again right before it runs.
+
+```json
+"housekeeping": { "worktreeDays": 7, "taskDays": 30, "auto": false }
+```
+
+`"auto": true` runs the cleanup by itself once a week.
+
 ## monday.com tickets
 
 Each project can point at its monday.com board. A column on the board says which crew role a

@@ -300,6 +300,7 @@ function renderSidebar() {
     <div class="nav-label">Projects</div>
     ${items || '<div class="empty">No projects in the config.</div>'}
     <div class="nav-foot">
+      <button class="btn sm ghost hk-btn" data-housekeeping title="Remove old worktrees and merged branches, archive old tasks">Housekeeping</button>
       <div>Stand-up: ${dr.enabled ? (S.nextDaily ? fmtTime(S.nextDaily) : dr.at) : 'off'}</div>
       <div>${S.claude.found ? esc(S.claude.version) : '<span style="color:var(--red)">Claude Code not found</span>'}</div>
       <div title="${esc(S.settings.workspacePath)}">${esc(S.settings.configFile)} · ${S.settings.maxConcurrent} at a time</div>
@@ -793,8 +794,68 @@ function appendLog(lines, force) {
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
+/* ---------------- housekeeping ---------------- */
+
+const size = b => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((b || 0) / 1024))} KB`);
+
+async function openHousekeeping() {
+  drawer = { kind: 'housekeeping', id: '' };
+  const el = $('#drawer');
+  el.innerHTML = `<div class="d-head" id="dHead"><div class="line1"><b>Housekeeping</b><span class="grow"></span><button class="icon-btn" data-close aria-label="Close">✕</button></div>
+      <h2>Clean up what is no longer needed</h2></div>
+    <div class="d-body"><div id="dInfo"><p class="hint">Checking worktrees and branches…</p></div></div>
+    <div class="d-foot" id="dFoot"></div>`;
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+  $('#scrim').classList.add('show');
+  try {
+    renderHousekeeping(await api('/api/housekeeping'));
+  } catch (e) {
+    $('#dInfo').innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  }
+}
+
+function renderHousekeeping(h) {
+  if (!drawer || drawer.kind !== 'housekeeping') return;
+  const p = h.plan;
+  const s = h.settings;
+  const list = (title, items, fmt) => items.length ? `<div class="d-section"><h4>${title} <span class="faint">(${items.length})</span></h4><ul class="hk-list">${items.map(i => `<li>${fmt(i)}</li>`).join('')}</ul></div>` : '';
+  const last = h.last
+    ? `<p class="hint">Last cleanup ${ago(h.last.at)} (${esc(h.last.trigger)}): ${[
+      h.last.done.worktrees + h.last.done.orphanDirs ? `${h.last.done.worktrees + h.last.done.orphanDirs} worktree(s)` : '',
+      h.last.done.branches ? `${h.last.done.branches} branch(es)` : '',
+      h.last.done.tasks ? `${h.last.done.tasks} task(s) archived` : '',
+      h.last.done.bytes ? `${size(h.last.done.bytes)} freed` : '',
+    ].filter(Boolean).join(', ') || 'nothing to do'}${h.last.skipped.length ? `; skipped ${h.last.skipped.length}` : ''}.</p>` : '';
+  $('#dInfo').innerHTML = `
+    <div class="hk-summary ${h.empty ? '' : 'has'}"><b>${esc(h.summary)}</b></div>
+    <p class="hint">Rules: a finished task's worktree goes after ${s.worktreeDays} day(s), or once its branch is merged; its branch stays unless every commit is already merged. Tasks older than ${s.taskDays} day(s) move to <code>data/archive</code>. Nothing a queued task builds on, and no worktree with uncommitted changes, is ever touched.</p>
+    ${list('Worktrees to remove', p.worktrees, w => `${esc(w.title)} <span class="faint">· ${esc(w.reason)} · ${size(w.sizeBytes)}</span><div class="faint mono">${esc(w.branch || '')}</div>`)}
+    ${list('Leftover worktree folders', p.orphanDirs, d => `<span class="mono">${esc(d.path)}</span> <span class="faint">· ${size(d.sizeBytes)}</span>`)}
+    ${list('Merged branches to delete', p.branches, b => `<span class="mono">${esc(b.name)}</span> <span class="faint">· ${esc(b.repo)} · ${esc(b.reason)}</span>`)}
+    ${list('Tasks and stand-ups to archive', [...p.tasks.map(id => (S.tasks.find(t => t.id === id) || { title: id }).title), ...p.reports.map(() => 'Stand-up')], x => esc(x))}
+    ${list('Kept', p.keep, k => `${k.kind === 'branch' ? `<span class="mono">${esc(k.name)}</span>` : esc(k.name)} <span class="faint">· ${esc(k.reason)}</span>`)}
+    <div class="d-section"><h4>Schedule</h4><p class="hint">${s.auto ? 'Runs by itself once a week.' : 'Runs only when you press Clean up.'} Change it in <code>settings.housekeeping</code> (<code>worktreeDays</code>, <code>taskDays</code>, <code>auto</code>).</p>${last}</div>`;
+  $('#dFoot').innerHTML = `<div class="acts"><button class="btn" data-hk="refresh">Check again</button>
+    <button class="btn primary" data-hk="run" ${h.empty ? 'disabled' : ''}>Clean up</button></div>`;
+}
+
+async function housekeepingAction(act) {
+  try {
+    if (act === 'refresh') return renderHousekeeping(await api('/api/housekeeping'));
+    if (!confirm('Clean up now? Worktree folders are deleted (branches with unmerged work are kept) and old tasks are archived.')) return;
+    $('#dFoot').innerHTML = '<div class="acts"><span class="hint">Cleaning up…</span></div>';
+    const r = await api('/api/housekeeping/run', { method: 'POST' });
+    toast(`Done: ${r.planned}${r.skipped.length ? ` (skipped ${r.skipped.length})` : ''}`);
+    renderHousekeeping(await api('/api/housekeeping'));
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 function refreshDrawer(first) {
   if (!drawer) return;
+  if (drawer.kind === 'housekeeping') return; // rendered on open and after each action
   if (drawer.kind === 'report') return refreshReportDrawer();
   const t = S.tasks.find(x => x.id === drawer.id);
   if (!t) return closeDrawer();
@@ -1183,6 +1244,9 @@ document.addEventListener('click', async e => {
       return;
     }
   }
+  if (e.target.closest('[data-housekeeping]')) { $('#sidebar').classList.remove('open'); return openHousekeeping(); }
+  const hk = e.target.closest('[data-hk]');
+  if (hk) return housekeepingAction(hk.dataset.hk);
   // Handoff and plan buttons in the task drawer.
   const hb = e.target.closest('[data-handoff],[data-plan]');
   if (hb && drawer) {

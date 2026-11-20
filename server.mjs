@@ -14,6 +14,8 @@ import { search as searchPeople, directory, contactsFor } from './lib/people.mjs
 import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
 import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH } from './lib/handoffs.mjs';
+import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
+import { gatherFacts, runPlan, clearTmp } from './lib/cleanup.mjs';
 
 const DATA = path.join(ROOT, 'data');
 const WT_DIR = path.join(DATA, 'worktrees');
@@ -22,6 +24,7 @@ const PUBLIC = path.join(ROOT, 'public');
 
 let cfg = loadConfig();
 const store = createStore(DATA);
+clearTmp(TMP); // system-prompt files left by runs that were interrupted
 const monday = createMonday(() => cfg);
 async function refreshMonday(projectId) {
   await monday.refresh(projectId);
@@ -455,6 +458,61 @@ setInterval(checkDaily, 30000);
 // Picks up runs held back by the daily limit once the day rolls over or the limit is raised.
 setInterval(() => pump(), 60000);
 
+/* ---------------- housekeeping ---------------- */
+
+const ARCHIVE = path.join(DATA, 'archive');
+const LOGS = path.join(DATA, 'logs');
+let pruning = false;
+
+async function housekeepingPreview() {
+  for (const p of cfg.projects) refreshRepos(p);
+  const facts = await gatherFacts({ projects: cfg.projects, tasks: S.tasks, worktreeRoot: WT_DIR });
+  const plan = planHousekeeping({ tasks: S.tasks, reports: S.reports, facts, settings: cfg.settings.housekeeping });
+  return { plan, summary: planSummary(plan), empty: planIsEmpty(plan) };
+}
+
+async function runHousekeeping(trigger) {
+  if (pruning) throw new Error('A cleanup is already running.');
+  pruning = true;
+  try {
+    const { plan, summary } = await housekeepingPreview();
+    const repoPath = t => {
+      const p = project(t.projectId);
+      const r = p && p.repos.find(x => x.name === t.repo);
+      return r ? r.path : '';
+    };
+    const { done, skipped } = await runPlan(plan, {
+      tasks: S.tasks,
+      reports: S.reports,
+      repoPathFor: repoPath,
+      allRepoPaths: () => cfg.projects.flatMap(p => p.repos.filter(r => r.exists).map(r => r.path)),
+      log,
+      archiveDir: ARCHIVE,
+      logDir: LOGS,
+      removeJob: (kind, id) => {
+        if (kind === 'task') { S.tasks = S.tasks.filter(t => t.id !== id); emit('task-removed', { id }); }
+        else S.reports = S.reports.filter(r => r.id !== id);
+      },
+    });
+    S.meta.lastPrune = { at: Date.now(), trigger, planned: summary, done, skipped };
+    store.save();
+    for (const t of S.tasks) if (t.cleaned) emit('task', t);
+    console.log(`Housekeeping (${trigger}): ${summary}${skipped.length ? `; skipped ${skipped.length}` : ''}`);
+    emit('reload', {});
+    return S.meta.lastPrune;
+  } finally {
+    pruning = false;
+  }
+}
+
+// Weekly cleanup, only when switched on in settings.housekeeping.auto.
+setInterval(() => {
+  const hk = cfg.settings.housekeeping;
+  const last = (S.meta.lastPrune || {}).at || 0;
+  if (!hk.auto || pruning || Date.now() - last < 7 * 864e5) return;
+  runHousekeeping('weekly').catch(e => console.warn(`Housekeeping failed: ${e.message}`));
+}, 3600e3);
+
 /* ---------------- HTTP ---------------- */
 
 const publicProject = p => ({
@@ -807,6 +865,15 @@ async function route(req, res, url) {
     const h = running.get(r.id);
     if (h) { h.cancelled = true; if (h.kill) h.kill(); }
     return send(res, 200, r);
+  }
+
+  if (m === 'GET' && url.pathname === '/api/housekeeping') {
+    const preview = await housekeepingPreview();
+    return send(res, 200, { ...preview, settings: cfg.settings.housekeeping, last: S.meta.lastPrune || null, running: pruning });
+  }
+
+  if (m === 'POST' && url.pathname === '/api/housekeeping/run') {
+    return send(res, 200, await runHousekeeping('manual'));
   }
 
   if (m === 'POST' && url.pathname === '/api/reload') {
