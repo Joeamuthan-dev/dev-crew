@@ -309,7 +309,25 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     red: new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.5 }),
     flowers: ['#f472b6', '#facc15', '#a78bfa', '#fb7185', '#f97316'].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7 })),
     lampGlow: new THREE.MeshStandardMaterial({ color: '#fff7d6', emissive: '#ffe9a8', emissiveIntensity: 0.9 }),
+    deskGlow: new THREE.MeshBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.32, depthWrite: false, blending: THREE.AdditiveBlending }),
+    rackFace: new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.3, metalness: 0.4 }),
+    ticketHead: new THREE.MeshStandardMaterial({ color: '#6366f1', roughness: 0.6 }),
+    ink: new THREE.MeshStandardMaterial({ color: '#94a3b8', roughness: 0.9 }),
   };
+  const CLOCK_FACE = canvasTex(256, 256, (g, W, H) => {
+    g.fillStyle = '#fffdf7';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#1f2937';
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      const r1 = k % 3 ? 104 : 96;
+      g.save();
+      g.translate(W / 2 + Math.sin(a) * r1, H / 2 - Math.cos(a) * r1);
+      g.rotate(a);
+      g.fillRect(-(k % 3 ? 3 : 5), 0, k % 3 ? 6 : 10, k % 3 ? 14 : 22);
+      g.restore();
+    }
+  });
   const FACE = { idle: faceTexture('idle'), working: faceTexture('working'), queued: faceTexture('queued'), review: faceTexture('review'), failed: faceTexture('failed') };
   const SCREEN = { code: screenTexture('code'), review: screenTexture('review'), failed: screenTexture('failed'), idle: screenTexture('idle') };
   const screenMat = Object.fromEntries(Object.entries(SCREEN).map(([k, t]) => [k, new THREE.MeshBasicMaterial({ map: t })]));
@@ -343,17 +361,93 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       g.add(mon);
       screens.push(screen);
     }
-    // personal touches: a mug, a lamp on some desks, a little cactus on others
+    // personal touches: a mug, and a little cactus on every other desk
     g.add(cyl(0.06, 0.05, 0.12, new THREE.MeshStandardMaterial({ color: roleColor, roughness: 0.5 }), -0.85, 0.88, 0.25, 12));
-    if (i % 2 === 0) {
-      g.add(cyl(0.12, 0.12, 0.03, M.dark, 0.95, 0.83, -0.3, 12));
-      g.add(box(0.03, 0.42, 0.03, M.dark, 0.95, 1.04, -0.3));
-      g.add(cyl(0.05, 0.14, 0.14, M.lampGlow, 0.95, 1.26, -0.2, 12));
-    } else {
-      g.add(cyl(0.07, 0.06, 0.08, M.terracotta, 0.95, 0.86, -0.3, 10));
-      g.add(cyl(0.045, 0.045, 0.16, M.leaf, 0.95, 0.98, -0.3, 8));
+    if (i % 2) {
+      g.add(cyl(0.07, 0.06, 0.08, M.terracotta, -0.98, 0.86, -0.12, 10));
+      g.add(cyl(0.045, 0.045, 0.16, M.leaf, -0.98, 0.98, -0.12, 8));
     }
-    return { group: g, screens };
+    // The focus lamp: an angled desk lamp that lights up while its owner is working.
+    const lamp = new THREE.Group();
+    lamp.position.set(1.0, 0.815, 0.0);
+    lamp.rotation.y = -Math.PI / 2; // leaning in over the desk
+    lamp.add(cyl(0.11, 0.12, 0.03, M.dark, 0, 0, 0, 12));
+    const lower = box(0.03, 0.4, 0.03, M.dark, 0, 0.2, 0);
+    lower.rotation.x = 0.25;
+    lamp.add(lower);
+    const upper = new THREE.Group();
+    upper.position.set(0, 0.39, 0.05);
+    upper.rotation.x = 1.05;
+    upper.add(box(0.03, 0.3, 0.03, M.dark, 0, 0.15, 0));
+    const shade = new THREE.Group();
+    shade.position.y = 0.3;
+    shade.rotation.x = 0.9;
+    shade.add(cyl(0.05, 0.12, 0.14, M.dark, 0, 0, 0, 14));
+    const bulbMat = new THREE.MeshStandardMaterial({ color: '#4b5563', emissive: '#ffd27a', emissiveIntensity: 0, roughness: 0.4 });
+    shade.add(cyl(0.1, 0.1, 0.01, bulbMat, 0, -0.07, 0, 14, false));
+    // a soft pool of light on the desk (no real light: one per desk would be too heavy)
+    const glow = new THREE.Mesh(geo('lampglow', () => new THREE.CircleGeometry(0.42, 24)), M.deskGlow);
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.set(0, 0.006, 0.5);
+    glow.visible = false;
+    lamp.add(glow);
+    upper.add(shade);
+    lamp.add(upper);
+    g.add(lamp);
+    // The flag: up when a branch waits for review (amber) or the last task failed (purple).
+    const flag = new THREE.Group();
+    flag.position.set(-1.05, 0.815, 0.42);
+    flag.add(cyl(0.05, 0.06, 0.03, M.dark, 0, 0.015, 0, 10));
+    flag.add(cyl(0.012, 0.012, 0.95, M.metal, 0, 0.475, 0, 6));
+    const flagMat = new THREE.MeshStandardMaterial({ color: '#f59e0b', roughness: 0.6, side: THREE.DoubleSide });
+    const cloth = new THREE.Mesh(geo('flagcloth', () => new THREE.PlaneGeometry(0.3, 0.19)), flagMat);
+    cloth.position.set(0.16, 0.84, 0);
+    flag.add(cloth);
+    flag.visible = false;
+    g.add(flag);
+    return { group: g, screens, lamp: { bulbMat, glow }, flag: { group: flag, cloth, mat: flagMat } };
+  }
+
+  /** A server rack for each floor: LEDs that blink faster while the crew is running builds. */
+  function makeRack() {
+    const g = new THREE.Group();
+    g.add(box(0.72, 1.75, 0.62, M.dark, 0, 0.875, 0));
+    g.add(box(0.62, 1.6, 0.02, M.rackFace, 0, 0.88, 0.315, false));
+    const leds = [];
+    for (let row = 0; row < 7; row++) {
+      g.add(box(0.56, 0.015, 0.01, M.frame, 0, 0.2 + row * 0.22, 0.33, false));
+      for (let col = 0; col < 3; col++) {
+        const mat = new THREE.MeshBasicMaterial({ color: '#1f2937' });
+        const led = new THREE.Mesh(geo('led', () => new THREE.BoxGeometry(0.035, 0.035, 0.01)), mat);
+        led.position.set(0.14 + col * 0.06, 0.28 + row * 0.22, 0.33);
+        g.add(led);
+        leds.push({ mat, phase: Math.random() * 10, rate: rand(0.6, 1.6), color: ['#22c55e', '#22c55e', '#38bdf8'][col] });
+      }
+    }
+    return { group: g, leds };
+  }
+
+  /** A wall clock with hour and minute hands that keep the local time. */
+  function makeClock() {
+    const g = new THREE.Group();
+    const face = new THREE.Mesh(geo('clockface', () => new THREE.CircleGeometry(0.3, 32)), new THREE.MeshBasicMaterial({ map: CLOCK_FACE }));
+    face.position.z = 0.012;
+    g.add(face);
+    const rim = new THREE.Mesh(geo('clockrim', () => new THREE.TorusGeometry(0.31, 0.025, 8, 32)), M.dark);
+    rim.position.z = 0.012;
+    g.add(rim);
+    const hand = (len, w, mat) => {
+      const pivot = new THREE.Group();
+      pivot.position.z = 0.02;
+      const h = box(w, len, 0.008, mat, 0, len / 2 - 0.03, 0, false);
+      pivot.add(h);
+      g.add(pivot);
+      return pivot;
+    };
+    const hour = hand(0.17, 0.03, M.dark);
+    const minute = hand(0.25, 0.02, M.dark);
+    const second = hand(0.26, 0.008, M.red);
+    return { group: g, hour, minute, second };
   }
 
   /** An office chair like the stand-up room's: cushioned seat and back, five wheels. */
@@ -491,7 +585,16 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     paddle.position.set(0, -0.52, 0.06);
     paddle.visible = false;
     arms[1].add(paddle);
-    return { root, legs, body, head, arms, bodyMat, faceMat, cup, paddle };
+    // a handoff ticket: a sheet of paper with a coloured header, carried to the next desk
+    const ticket = new THREE.Group();
+    ticket.add(box(0.34, 0.24, 0.015, M.paper, 0, 0, 0, false));
+    ticket.add(box(0.34, 0.05, 0.018, M.ticketHead, 0, 0.095, 0, false));
+    for (let k = 0; k < 3; k++) ticket.add(box(0.24 - k * 0.05, 0.015, 0.02, M.ink, -0.03 + k * 0.025, 0.03 - k * 0.045, 0, false));
+    ticket.position.set(0, 1.32, 0.42);
+    ticket.rotation.x = -0.5;
+    ticket.visible = false;
+    root.add(ticket);
+    return { root, legs, body, head, arms, bodyMat, faceMat, cup, paddle, ticket };
   }
 
   /* ---------------- the stand-up room and its globe ---------------- */
@@ -718,7 +821,15 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       shelf.rotation.y = -Math.PI / 2;
       group.add(shelf);
 
-      const zone = { id: p.id, kind: 'zone', ang, pos: zpos, rot, group, rimMat, floorMat, boardMat, boardSig: '', cooler: [RING_A + 0.2, -RING_B - 0.55] };
+      const rack = makeRack();
+      rack.group.position.set(-ZONE_W / 2 + 0.5, FLOOR, -1.7);
+      rack.group.rotation.y = Math.PI / 2;
+      group.add(rack.group);
+      const wallClock = makeClock();
+      wallClock.group.position.set(0, FLOOR + 1.45, bz + 0.05);
+      group.add(wallClock.group);
+
+      const zone = { id: p.id, kind: 'zone', ang, pos: zpos, rot, group, rimMat, floorMat, boardMat, boardSig: '', cooler: [RING_A + 0.2, -RING_B - 0.55], rack, clock: wallClock, running: 0 };
       const [ex, ez] = toLocal(zone, new THREE.Vector3(0, 0, 0));
       zone.exitT = ringParam(ex, ez);
       zones.push(zone);
@@ -743,7 +854,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         scene.add(fig.root);
         const seatW = W(zone, x, side * 2.0);
         const a = {
-          key: `${p.id}:${roleId}`, pid: p.id, role: roleId, zone, fig, screens: desk.screens,
+          key: `${p.id}:${roleId}`, pid: p.id, role: roleId, zone, fig, screens: desk.screens, lamp: desk.lamp, flag: desk.flag, lampOn: 0,
           seat: { x, z: side * 2.0, facing: localFacing + rot, aisleT: ringParam(x, side * RING_B) },
           pos: seatW.clone(), heading: localFacing + rot, sit: 1, sitGoal: 1,
           where: 'zone', loc: 'seat', spot: null,
@@ -1113,6 +1224,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     a.sitGoal = 0;
     a.pose = null;
     a.arrived = false; // not at the new spot yet (the games wait for real arrivals)
+    a.ticket = !!dest.deliver;
   }
 
   const freeSpot = (list, pose) => {
@@ -1171,7 +1283,13 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     const wantDesk = a.state === 'working' || a.state === 'queued';
     if (a.focused) return;
     const walking = a.path.length > 0;
-    if (wantDesk && a.loc !== 'seat' && (!walking || a.dest.kind !== 'seat')) { plan(a, { kind: 'seat' }); return; }
+    if (wantDesk && a.loc !== 'seat' && (!walking || a.dest.kind !== 'seat')) { a.deliveries = null; plan(a, { kind: 'seat' }); return; }
+    // A handoff: walk the ticket over to the next role's desk, then carry on.
+    if (!wantDesk && a.deliveries && a.deliveries.length && !(walking && a.dest && a.dest.deliver)) {
+      const b = a.deliveries.shift();
+      plan(a, { kind: 'ring', t: b.seat.aisleT, visit: b, deliver: b });
+      return;
+    }
     if (walking) return;
     a.timer -= dt;
     if (a.timer > 0) return;
@@ -1241,11 +1359,15 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     if (pose === 'chat') { armR = -0.5 + Math.max(0, Math.sin(t * 1.7 + a.phase)) * 0.6; armZ = 0.15; } // talking with their hands
     f.arms[0].rotation.x = armL;
     f.arms[1].rotation.x = armR;
-    a.wave += ((a.focused ? 1 : 0) - a.wave) * Math.min(1, dt * 6);
+    if (a.thanks > 0) a.thanks -= dt;
+    a.wave += ((a.focused || a.thanks > 0 ? 1 : 0) - a.wave) * Math.min(1, dt * 6);
     f.arms[1].rotation.z = a.wave * (2.5 + Math.sin(t * 9) * 0.35) + armZ;
     f.arms[0].rotation.z = -armZ;
     f.cup.visible = pose === 'cafe';
     f.paddle.visible = pose === 'pong';
+    // carrying a handoff ticket: held out in front, both hands on it
+    f.ticket.visible = !!a.ticket;
+    if (a.ticket) { f.arms[0].rotation.x = Math.min(armL, -1.1); f.arms[1].rotation.x = Math.min(armR, -1.1); }
 
     f.head.rotation.x = typing ? 0.12 + Math.sin(t * 2 + a.phase) * 0.04 : -0.05;
     f.head.rotation.y = a.focused || speed ? 0 : Math.sin(t * 0.5 + a.phase) * 0.3;
@@ -1282,6 +1404,12 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       a.where = 'zone';
       a.loc = 'ring';
       if (d.visit) a.lookAt = d.visit.pos.clone();
+      if (d.deliver) {
+        a.ticket = false;
+        a.timer = rand(2, 3.5);
+        d.deliver.thanks = 1.6;
+        a.thanks = 0.8;
+      }
       a.timer = rand(3, 7);
     }
   }
@@ -1354,7 +1482,25 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
 
   let hubBusy = false;
   let themeKey = '';
+  // Tasks already seen, so a handoff is walked over once, when it appears (not on page load).
+  const seenTasks = new Set();
+  let seededTasks = false;
+  function noteHandoffs(tasks) {
+    for (const t of tasks) {
+      if (seenTasks.has(t.id)) continue;
+      seenTasks.add(t.id);
+      if (!seededTasks || !t.parentId || (t.origin !== 'handoff' && t.origin !== 'plan')) continue;
+      const parent = tasks.find(x => x.id === t.parentId);
+      const from = parent && agents.get(`${t.projectId}:${parent.role}`);
+      const to = agents.get(`${t.projectId}:${t.role}`);
+      if (!from || !to || from === to) continue;
+      (from.deliveries = from.deliveries || []).push(to);
+    }
+    seededTasks = true;
+  }
+
   function update(S, activity) {
+    noteHandoffs(S.tasks);
     const bg = cssVar('--bg') || '#f6f7f9';
     const dark = new THREE.Color(bg).getHSL({}).l < 0.3;
     scene.background = new THREE.Color(bg);
@@ -1389,6 +1535,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       // the whiteboard: queued, running and review counts as sticky notes
       const todo = tasks.filter(t => t.status === 'queued' || t.status === 'blocked').length;
       const doing = tasks.filter(t => t.status === 'running').length;
+      z.running = doing;
       const review = tasks.filter(t => t.mode === 'change' && t.status === 'done' && !t.cleaned && t.git && t.git.commits.length).length;
       const sig = `${todo}/${doing}/${review}`;
       if (sig !== z.boardSig) {
@@ -1639,10 +1786,37 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     for (const a of agents.values()) {
       if (!still) think(a, dt);
       else if (a.loc !== 'seat' && !a.path.length) plan(a, { kind: 'seat' });
+      if (still) a.deliveries = null;
       move(a, still && !a.path.length ? 1 : dt, t);
       const seated = a.loc === 'seat' && !a.path.length;
       const kind = a.state === 'working' && seated ? 'code' : a.state === 'review' ? 'review' : a.state === 'failed' ? 'failed' : 'idle';
       for (const sc of a.screens) if (sc.material !== screenMat[kind]) sc.material = screenMat[kind];
+      // the focus lamp fades on while they work; the flag is up for a review or a failure
+      const lampGoal = a.state === 'working' && seated ? 1 : 0;
+      a.lampOn = off ? lampGoal : a.lampOn + (lampGoal - a.lampOn) * Math.min(1, dt * 3);
+      a.lamp.bulbMat.emissiveIntensity = a.lampOn * 2.4;
+      a.lamp.glow.visible = a.lampOn > 0.1;
+      const flagColor = a.state === 'review' ? '#f59e0b' : a.state === 'failed' ? '#8b5cf6' : '';
+      a.flag.group.visible = !!flagColor;
+      if (flagColor && a.flagColor !== flagColor) { a.flag.mat.color.set(flagColor); a.flagColor = flagColor; }
+      if (flagColor) a.flag.cloth.rotation.y = still ? 0 : Math.sin(t * 3 + a.phase) * 0.3;
+    }
+
+    // server racks blink faster while the floor's crew is running; clocks keep the local time
+    const now = new Date();
+    const sec = now.getSeconds();
+    const min = now.getMinutes() + sec / 60;
+    const hr = (now.getHours() % 12) + min / 60;
+    for (const z of zones) {
+      const speed = z.running ? 9 : 1.4;
+      for (const led of z.rack.leds) {
+        const on = off || Math.sin(t * led.rate * speed + led.phase) > (z.running ? -0.2 : -0.6);
+        if (on !== led.on) { led.on = on; led.mat.color.set(on ? led.color : '#1f2937'); }
+      }
+      z.clock.hour.rotation.z = -(hr / 12) * Math.PI * 2;
+      z.clock.minute.rotation.z = -(min / 60) * Math.PI * 2;
+      z.clock.second.rotation.z = -(sec / 60) * Math.PI * 2;
+      z.clock.second.visible = !still;
     }
 
     playGames(t);
