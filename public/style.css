@@ -5,11 +5,11 @@
   --line: #e3e6eb;
   --text: #161a22;
   --muted: #5d6675;
-  --faint: #8a93a3;
+  --faint: #646d7e;
   --accent: #4f46e5;
   --accent-ink: #ffffff;
   --accent-soft: #eef0ff;
-  --green: #15803d;
+  --green: #166f37;
   --green-soft: #e7f6ec;
   --amber: #b45309;
   --amber-soft: #fdf3e2;
@@ -28,7 +28,7 @@
   --line: #2a313d;
   --text: #e6e9ef;
   --muted: #a1a9b8;
-  --faint: #737c8c;
+  --faint: #8b94a5;
   --accent: #818cf8;
   --accent-ink: #0e1117;
   --accent-soft: #23264a;
@@ -50,7 +50,7 @@
     --line: #2a313d;
     --text: #e6e9ef;
     --muted: #a1a9b8;
-    --faint: #737c8c;
+    --faint: #8b94a5;
     --accent: #818cf8;
     --accent-ink: #0e1117;
     --accent-soft: #23264a;
@@ -672,3 +672,78 @@ code.perm { font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background:
 .ok-text { color: var(--green); }
 .d-section .warn { color: var(--amber); }
 .role-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; font-size: 13px; }
+
+/* ======================================================================
+   Design system (Phase 6, part 2): shared tokens for spacing, type, radius
+   and motion, one focus style, and the motion used by drawers, dialogs,
+   pages, toasts and numbers. Everything honours Settings → Motion and the
+   system's "reduce motion".
+   ====================================================================== */
+:root {
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --fs-xs: 11.5px; --fs-sm: 12.5px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 22px;
+  --r-sm: 6px; --r-md: 8px; --r-lg: 14px;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --ease-in: cubic-bezier(.4, 0, 1, 1);
+  --dur-1: 120ms; --dur-2: 200ms; --dur-3: 300ms;
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+/* One visible focus style for keyboard users; mouse clicks show none. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible, .icon-btn:focus-visible, .chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.people-search input:focus { box-shadow: var(--focus-ring); }
+[role="button"]:not(button) { cursor: pointer; }
+.office-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.skip-link {
+  position: fixed; left: var(--sp-3); top: var(--sp-2); z-index: 100;
+  transform: translateY(-160%); transition: transform var(--dur-2) var(--ease);
+  height: 32px; padding: 0 var(--sp-3); border-radius: var(--r-md);
+  border: 0; background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer;
+}
+.skip-link:focus-visible { transform: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Controls: the same short, eased response everywhere. */
+.btn, .icon-btn, .chip-btn, .nav-item, .seg span, .role-pick label, .mode-pick label {
+  transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease), box-shadow var(--dur-2) var(--ease), transform var(--dur-1) var(--ease), filter var(--dur-1) var(--ease);
+}
+.btn:active:not(:disabled), .icon-btn:active { transform: translateY(1px); }
+.card { transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease); }
+.proj-card:hover, .crew-card:hover { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+
+/* Drawer and scrim: slide and fade, and out of the tab order while closed. */
+.drawer { visibility: hidden; transition: transform var(--dur-3) var(--ease), visibility 0s linear var(--dur-3); }
+.drawer.open { visibility: visible; transition: transform var(--dur-3) var(--ease); }
+.scrim { display: block; opacity: 0; pointer-events: none; transition: opacity var(--dur-3) var(--ease); }
+.scrim.show { opacity: 1; pointer-events: auto; }
+
+/* Dialogs: a short rise and fade. */
+.modal[open] { animation: dlg-in var(--dur-2) var(--ease); }
+.modal[open]::backdrop { animation: fade-in var(--dur-2) var(--ease); }
+@keyframes dlg-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Page changes: the new page fades up; its first blocks follow one after another. */
+.main.page-enter > * { animation: page-in var(--dur-3) var(--ease) both; }
+.main.page-enter > *:nth-child(2) { animation-delay: 40ms; }
+.main.page-enter > *:nth-child(3) { animation-delay: 80ms; }
+.main.page-enter > *:nth-child(n+4) { animation-delay: 110ms; }
+@keyframes page-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Toasts and numbers. */
+.toast { transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease); }
+.num-tick { font-variant-numeric: tabular-nums; }
+.top-stats b, .stats b, .viz-value, .viz-hero-value { font-variant-numeric: tabular-nums; }
+
+/* Settings → Motion: reduced keeps fades short and drops movement; off stops everything. */
+:root[data-motion="reduced"] *, :root[data-motion="reduced"] *::before, :root[data-motion="reduced"] *::after { transition-duration: 0.01ms !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; animation-delay: 0ms !important; }
+}
