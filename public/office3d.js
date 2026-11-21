@@ -733,7 +733,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
           seat: { x, z: side * 2.0, facing: localFacing + rot, aisleT: ringParam(x, side * RING_B) },
           pos: seatW.clone(), heading: localFacing + rot, sit: 1, sitGoal: 1,
           where: 'zone', loc: 'seat', spot: null,
-          path: [], dest: null, timer: rand(1, 12), phase: Math.random() * 10, walkPhase: 0,
+          path: [], dest: null, timer: rand(1, 5), phase: Math.random() * 10, walkPhase: 0,
           state: 'idle', prevState: 'idle', focused: false, wave: 0, lookAt: null, pose: null,
         };
         const pick = { kind: 'agent', projectId: p.id, role: roleId };
@@ -950,6 +950,18 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     pl.spots.push(spotAt(pl, 7.0, -3.4 - 0.85, 0, false, 'foos'));
     pl.spots.push(spotAt(pl, 7.0, -3.4 + 0.85, Math.PI, false, 'foos'));
     pl.foosSpots = pl.spots.slice(-2);
+
+    // standing spots for a chat, in pairs facing each other: by the entrance and between the
+    // café and the lounge
+    pl.chatPairs = [];
+    for (const [cx, cz, along] of [[1.4, 5.8, 'x'], [0.2, 0.2, 'z'], [-1.6, -4.4, 'x']]) {
+      const d = 0.55;
+      const pair = along === 'x'
+        ? [spotAt(pl, cx - d, cz, Math.PI / 2, false, 'chat'), spotAt(pl, cx + d, cz, -Math.PI / 2, false, 'chat')]
+        : [spotAt(pl, cx, cz - d, 0, false, 'chat'), spotAt(pl, cx, cz + d, Math.PI, false, 'chat')];
+      pl.spots.push(...pair);
+      pl.chatPairs.push(pair);
+    }
     return pl;
   }
 
@@ -1012,6 +1024,11 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       path.push(doorPt(d, ROOM_R - 0.6), doorPt(d, ROOM_R + 0.6), plazaPt(d));
       return d;
     }
+    if (a.where === 'plaza') {
+      const ang = Math.atan2(a.pos.z, a.pos.x);
+      path.push(plazaPt(ang));
+      return ang;
+    }
     const pl = a.spot ? a.spot.place : places[a.where];
     path.push(W(pl, 0, pl.depth / 2 + 0.4), plazaPt(pl.ang));
     return pl.ang;
@@ -1071,6 +1088,9 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         path.push(W(s.place, 0, s.place.depth / 2 + 0.4));
       }
       path.push(s.pos.clone());
+    } else if (dest.kind === 'plaza') {
+      // a stroll round the plaza walkway to somewhere else on it
+      arc(leave(a, path), dest.ang, path);
     }
     a.path = path;
     a.dest = dest;
@@ -1084,7 +1104,11 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     return free.length ? pickOne(free) : null;
   };
 
-  /** Where a free crew member goes next. */
+  /**
+   * Where a free crew member goes next. Free people do not hang about at their desks: they spend
+   * their time in the café & lounge (coffee, sofas, a chat, a game) or take a walk round the
+   * plaza, and only now and then drop by a busy teammate. Work brings them back to their desk.
+   */
   function pickOuting(a) {
     if (hubBusy) {
       const s = freeSpot(STAND_SEATS);
@@ -1092,21 +1116,24 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     }
     const r = Math.random();
     const L = places.lounge;
-    if (L && r < 0.24) {
+    if (L && r < 0.25) {
       // a game: join someone waiting at a table first, so games actually start
       const waiting = [L.pongSpots, L.foosSpots].find(pair => pair.some(s => s.taken) && pair.some(s => !s.taken));
       const s = waiting ? waiting.find(x => !x.taken) : freeSpot(L.spots.filter(x => x.pose === 'pong' || x.pose === 'foos'));
-      if (s) return { kind: 'spot', spot: s, stay: rand(20, 36) };
+      if (s) return { kind: 'spot', spot: s, stay: rand(24, 40) };
     }
-    if (L && r < 0.7) { const s = freeSpot(L.spots, 'cafe'); if (s) return { kind: 'spot', spot: s, stay: rand(14, 30) }; }
-    if (r < 0.78) return { kind: 'cooler' };
-    if (r < 0.9) {
-      const mates = [...agents.values()].filter(m => m.zone === a.zone && m !== a);
-      if (mates.length) { const mate = pickOne(mates); return { kind: 'ring', t: mate.seat.aisleT + rand(-0.4, 0.4), visit: mate }; }
+    if (L && r < 0.42) {
+      // a chat: join someone already standing at a chat spot
+      const pairs = L.chatPairs || [];
+      const waiting = pairs.find(pair => pair.some(s => s.taken) && pair.some(s => !s.taken));
+      const s = waiting ? waiting.find(x => !x.taken) : freeSpot(L.spots, 'chat');
+      if (s) return { kind: 'spot', spot: s, stay: rand(14, 26) };
     }
-    const s = freeSpot(STAND_SEATS);
-    if (s && Math.random() < 0.5) return { kind: 'spot', spot: s, stay: rand(6, 12) };
-    return { kind: 'ring', t: rand(0, RING_P) };
+    if (L && r < 0.85) { const s = freeSpot(L.spots, 'cafe'); if (s) return { kind: 'spot', spot: s, stay: rand(20, 45) }; }
+    if (r < 0.95) return { kind: 'plaza', ang: Math.random() * Math.PI * 2 };
+    const busy = [...agents.values()].filter(m => m.zone === a.zone && m !== a && m.state === 'working');
+    if (busy.length) { const mate = pickOne(busy); return { kind: 'ring', t: mate.seat.aisleT + rand(-0.4, 0.4), visit: mate }; }
+    return { kind: 'plaza', ang: Math.random() * Math.PI * 2 };
   }
 
   function floorY(p) {
@@ -1134,11 +1161,11 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     if (a.timer > 0) return;
     if (a.loc === 'seat' && a.where === 'zone') {
       if (wantDesk) { a.timer = rand(5, 10); return; }
-      plan(a, pickOuting(a));
-    } else if (wantDesk || Math.random() < 0.4) {
+      plan(a, pickOuting(a));               // nothing to do: off they go
+    } else if (wantDesk) {
       plan(a, { kind: 'seat' });
     } else {
-      plan(a, pickOuting(a));
+      plan(a, pickOuting(a));               // still free: somewhere else, never back to the desk
     }
   }
 
@@ -1195,6 +1222,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     if (pose === 'cafe') armR = -1.5 + Math.sin(t * 0.8 + a.phase) * 0.25; // sipping coffee
     if (pose === 'pong') { const sw = a.paddleSwing || 0; armR = -0.9 - sw * 0.7; armZ = 0.25 - sw * 0.6; armL = -0.3; }
     if (pose === 'foos') { armL = -1.25 + Math.sin(t * 6 + a.phase) * 0.12; armR = -1.25 + Math.sin(t * 6 + a.phase + 2) * 0.12; }
+    if (pose === 'chat') { armR = -0.5 + Math.max(0, Math.sin(t * 1.7 + a.phase)) * 0.6; armZ = 0.15; } // talking with their hands
     f.arms[0].rotation.x = armL;
     f.arms[1].rotation.x = armR;
     a.wave += ((a.focused ? 1 : 0) - a.wave) * Math.min(1, dt * 6);
@@ -1229,6 +1257,11 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       a.loc = 'spot';
       a.lookAt = W(a.zone, a.zone.cooler[0], a.zone.cooler[1]);
       a.timer = rand(4, 8);
+    } else if (d.kind === 'plaza') {
+      a.where = 'plaza';
+      a.loc = 'away';
+      a.lookAt = new THREE.Vector3(0, 0, 0); // a look at the stand-up room's globe
+      a.timer = rand(3, 8);
     } else {
       a.where = 'zone';
       a.loc = 'ring';
@@ -1368,7 +1401,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         else if (a.state === 'failed') text = `<b>${esc(role.short)}</b> needs attention: ${esc(last.title)}`;
         else if (rv) text = `<b>${esc(role.short)}</b> ${rv} to review`;
         else if (queued) text = `<b>${esc(role.short)}</b> ${queued} queued`;
-        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ lounge: a.pose === 'pong' ? 'playing ping-pong' : a.pose === 'foos' ? 'playing foosball' : 'at the café', room: 'in the stand-up room' }[a.where] || ''}` : ''}`;
+        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ lounge: a.pose === 'pong' ? 'playing ping-pong' : a.pose === 'foos' ? 'playing foosball' : a.pose === 'chat' ? 'chatting in the lounge' : 'at the café', plaza: 'taking a walk', room: 'in the stand-up room' }[a.where] || ''}` : ''}`;
         if (lab.innerHTML !== text) lab.innerHTML = text;
         lab.dataset.state = a.state;
         lab.title = run ? `${role.name}: ${run.title}` : `${role.name} — click to talk`;
