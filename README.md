@@ -137,6 +137,12 @@ legend and the Live panel fold away with their **–** button. Settings → Appe
 motion (reduced keeps everyone at their desks, off stops everything), 3D quality and a simple 2D
 view.
 
+**Keyboard.** Everything works without a mouse: Tab shows a clear focus ring, the first Tab offers
+**Skip to content**, Enter opens a feed row or an office name tag (the camera flies to that
+person), Escape closes the task panel and focus returns to where you were. Ctrl+K jumps to "Who
+should I ask?". Drawers, dialogs, page changes and counters animate briefly; Settings → Motion or
+your system's "reduce motion" setting turns that off.
+
 ## Handoffs and plans
 
 **Handoffs.** When an agent finishes and another role must act for the work to be complete (new

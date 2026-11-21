@@ -186,6 +186,7 @@ function healthPill(r) {
 
 function toast(msg, err = false) {
   const el = $('#toast');
+  el.setAttribute('role', err ? 'alert' : 'status');
   el.textContent = msg;
   el.className = 'toast show' + (err ? ' err' : '');
   clearTimeout(toast.t);
@@ -260,6 +261,60 @@ function md(src) {
   return `<div class="md">${html}</div>`;
 }
 
+/* ---------------- motion helpers ---------------- */
+
+/** Movement is allowed: Settings → Motion is Full and the system does not ask for less. */
+const motionOn = () => !['off', 'reduced'].includes(document.documentElement.dataset.motion)
+  && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Numbers count to their new value when they change (not on first sight). Each has a key, so it
+// is recognised again after a live update redraws the page.
+const NUM_FMT = {
+  int: v => Math.round(v).toLocaleString(),
+  usd: v => usd(v),
+  usd2: v => '$' + v.toFixed(2),
+  pct: v => pct(v),
+};
+const numSeen = new Map();
+function num(value, key, fmt = 'int') {
+  const v = Number(value) || 0;
+  return `<span data-num="${v}" data-num-key="${esc(key)}" data-fmt="${fmt}">${NUM_FMT[fmt](v)}</span>`;
+}
+function animateNumbers(root = document) {
+  if (!root) return;
+  for (const el of root.querySelectorAll('[data-num-key]')) {
+    const key = el.dataset.numKey;
+    const to = Number(el.dataset.num);
+    const prev = numSeen.get(key);
+    if (prev && prev.raf) cancelAnimationFrame(prev.raf);
+    const entry = { value: to, raf: 0 };
+    numSeen.set(key, entry);
+    if (!prev || prev.value === to || !motionOn()) continue;
+    const from = prev.value;
+    const fmt = NUM_FMT[el.dataset.fmt] || NUM_FMT.int;
+    const final = el.textContent;
+    const t0 = performance.now();
+    const step = now => {
+      if (!el.isConnected) return;
+      const k = Math.min(1, (now - t0) / 650);
+      el.textContent = k < 1 ? fmt(from + (to - from) * (1 - Math.pow(1 - k, 3))) : final;
+      entry.raf = k < 1 ? requestAnimationFrame(step) : 0;
+    };
+    entry.raf = requestAnimationFrame(step);
+  }
+}
+
+// A short entrance when the page changes, not on live updates of the same page.
+let shownPage = '';
+function pageEnter(main, key) {
+  if (key === shownPage) return;
+  shownPage = key;
+  main.classList.remove('page-enter');
+  if (!motionOn()) return;
+  void main.offsetWidth; // restart the animation
+  main.classList.add('page-enter');
+}
+
 /* ---------------- layout ---------------- */
 
 function route() {
@@ -278,7 +333,9 @@ function render() {
   const r = route();
   const main = $('#main');
   const twoD = ((S.settings.ui || {}).officeView) === '2d';
-  if (r.view === 'office' && !twoD) return renderOffice();
+  animateNumbers($('#topStats'));
+  if (r.view === 'office' && !twoD) { shownPage = 'office3d'; main.classList.remove('page-enter'); return renderOffice(); }
+  pageEnter(main, [r.view, r.id || '', r.tab || ''].join('/'));
   main.classList.remove('full');
   closeAgentCard();
   if (office && office.stop) office.stop();
@@ -292,6 +349,7 @@ function render() {
   else if (r.view === 'office') main.innerHTML = office2dView();
   else main.innerHTML = todayView();
   window.scrollTo(0, scroll);
+  animateNumbers(main);
 }
 
 function renderTop() {
@@ -303,10 +361,10 @@ function renderTop() {
     ? 'Daily spend limit reached: queued runs wait until tomorrow or until the limit is raised'
     : 'API-equivalent cost reported by Claude Code, against your daily limit';
   $('#topStats').innerHTML = `
-    <span><b>${running}</b> working</span>
-    <span><b>${queued}</b> queued</span>
-    <span><b>${review}</b> to review</span>
-    <span class="spend ${sp.state}" title="${spendTitle}"><b>$${sp.today.toFixed(2)}</b>${sp.daily ? ` / $${sp.daily}` : ''} today${sp.paused ? ' · paused' : ''}</span>`;
+    <span><b>${num(running, 'top-running')}</b> working</span>
+    <span><b>${num(queued, 'top-queued')}</b> queued</span>
+    <span><b>${num(review, 'top-review')}</b> to review</span>
+    <span class="spend ${sp.state}" title="${spendTitle}"><b>${num(sp.today, 'top-spend', 'usd2')}</b>${sp.daily ? ` / $${sp.daily}` : ''} today${sp.paused ? ' · paused' : ''}</span>`;
 }
 
 function renderSidebar() {
@@ -314,7 +372,7 @@ function renderSidebar() {
   const items = S.projects.map(p => {
     const rep = latestReport(p.id);
     const live = tasksOf(p.id).filter(t => t.status === 'running' || t.status === 'queued').length;
-    return `<a class="nav-item ${r.view === 'project' && r.id === p.id ? 'active' : ''}" href="#/p/${p.id}">
+    return `<a class="nav-item ${r.view === 'project' && r.id === p.id ? 'active' : ''}" href="#/p/${p.id}"${r.view === 'project' && r.id === p.id ? ' aria-current="page"' : ''}>
       <span class="dot ${rep ? rep.health : ''}"></span>
       <span class="grow">${esc(p.name)}</span>
       ${live ? `<span class="count live">${live}</span>` : ''}
@@ -322,10 +380,10 @@ function renderSidebar() {
   }).join('');
   const dr = S.settings.dailyReport;
   $('#sidebar').innerHTML = `
-    <a class="nav-item ${r.view === 'office' ? 'active' : ''}" href="#/office"><span class="grow">Office</span></a>
-    <a class="nav-item ${r.view === 'today' ? 'active' : ''}" href="#/today"><span class="grow">Today</span></a>
-    <a class="nav-item ${r.view === 'costs' ? 'active' : ''}" href="#/costs"><span class="grow">Costs</span></a>
-    <a class="nav-item ${r.view === 'settings' ? 'active' : ''}" href="#/settings"><span class="grow">Settings</span></a>
+    <a class="nav-item ${r.view === 'office' ? 'active' : ''}" href="#/office"${r.view === 'office' ? ' aria-current="page"' : ''}><span class="grow">Office</span></a>
+    <a class="nav-item ${r.view === 'today' ? 'active' : ''}" href="#/today"${r.view === 'today' ? ' aria-current="page"' : ''}><span class="grow">Today</span></a>
+    <a class="nav-item ${r.view === 'costs' ? 'active' : ''}" href="#/costs"${r.view === 'costs' ? ' aria-current="page"' : ''}><span class="grow">Costs</span></a>
+    <a class="nav-item ${r.view === 'settings' ? 'active' : ''}" href="#/settings"${r.view === 'settings' ? ' aria-current="page"' : ''}><span class="grow">Settings</span></a>
     <div class="nav-label">Projects</div>
     ${items || '<div class="empty">No projects yet.</div>'}
     <a class="nav-item add" href="#" data-add-project><span class="grow">+ Add project</span></a>
@@ -417,11 +475,11 @@ function renderOffice() {
   refreshAgentCard();
   const items = feed.slice(0, 7).map(f => {
     const p = projOf(f.projectId);
-    return `<li data-task="${f.task}">${roleChip(f.role)}<span class="f-text"><b>${esc(p ? p.name : '')}</b> ${esc(f.text)}</span><time>${ago(f.at)}</time></li>`;
+    return `<li data-task="${f.task}" tabindex="0" role="button">${roleChip(f.role)}<span class="f-text"><b>${esc(p ? p.name : '')}</b> ${esc(f.text)}</span><time>${ago(f.at)}</time></li>`;
   }).join('');
   const running = S.tasks.filter(t => t.status === 'running');
   $('#officeFeed').innerHTML = items || (running.length
-    ? running.map(t => `<li data-task="${t.id}">${roleChip(t.role)}<span class="f-text"><b>${esc((projOf(t.projectId) || {}).name || '')}</b> ${esc(t.title)}</span></li>`).join('')
+    ? running.map(t => `<li data-task="${t.id}" tabindex="0" role="button">${roleChip(t.role)}<span class="f-text"><b>${esc((projOf(t.projectId) || {}).name || '')}</b> ${esc(t.title)}</span></li>`).join('')
     : '<li class="f-empty">Quiet right now. Assign a task and the work shows up here as it happens.</li>');
 }
 
@@ -681,10 +739,10 @@ function todayView() {
       <div class="stack">${esc(p.stack || '')}</div>
       <div class="headline ${headline ? '' : 'none'}">${runningRep ? 'Writing today\'s stand-up…' : headline ? inline(headline) + `<div style="color:var(--faint);font-size:11.5px;margin-top:4px">${rep.date} stand-up</div>` : 'No stand-up yet. Run one to get the crew\'s view.'}</div>
       <div class="stats">
-        <div><b>${ts.filter(t => t.status === 'running').length}</b>working</div>
-        <div><b>${ts.filter(t => t.status === 'queued').length}</b>queued</div>
-        <div><b>${ts.filter(needsReview).length}</b>to review</div>
-        <div><b>${ts.filter(t => t.status === 'done' && isToday(t.endedAt)).length}</b>done today</div>
+        <div><b>${num(ts.filter(t => t.status === 'running').length, p.id + '-run')}</b>working</div>
+        <div><b>${num(ts.filter(t => t.status === 'queued').length, p.id + '-queue')}</b>queued</div>
+        <div><b>${num(ts.filter(needsReview).length, p.id + '-review')}</b>to review</div>
+        <div><b>${num(ts.filter(t => t.status === 'done' && isToday(t.endedAt)).length, p.id + '-done')}</b>done today</div>
       </div>
       <div class="crew-strip">${crewRoles(p).map(r => roleChip(r.id, busy.has(r.id) ? 'busy' : 'idle')).join('')}</div>
       <div class="card-actions">
@@ -746,7 +804,7 @@ function projectView(p, tab) {
       </div>
     </div>
     ${p.exists ? '' : problemsNotice()}
-    <nav class="tabs">${tabs.map(([k, l]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/p/${p.id}/${k}">${l}</a>`).join('')}</nav>
+    <nav class="tabs" aria-label="Project sections">${tabs.map(([k, l]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/p/${p.id}/${k}"${tab === k ? ' aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
     ${body}`;
 }
 
@@ -816,7 +874,9 @@ function standupsTab(p) {
 
 /* ---------------- drawer ---------------- */
 
+let drawerOpener = null;
 function openDrawer(kind, id) {
+  if (!drawer) drawerOpener = document.activeElement;
   drawer = { kind, id };
   const el = $('#drawer');
   el.innerHTML = `<div class="d-head" id="dHead"></div>
@@ -828,6 +888,8 @@ function openDrawer(kind, id) {
   el.setAttribute('aria-hidden', 'false');
   $('#scrim').classList.add('show');
   refreshDrawer(true);
+  const close = el.querySelector('[data-close]');
+  if (close) close.focus({ preventScroll: true });
   api(`/api/log/${id}`).then(lines => { $('#dLog').innerHTML = ''; appendLog(lines, true); }).catch(() => {});
 }
 
@@ -836,6 +898,8 @@ function closeDrawer() {
   $('#drawer').classList.remove('open');
   $('#drawer').setAttribute('aria-hidden', 'true');
   $('#scrim').classList.remove('show');
+  if (drawerOpener && drawerOpener.isConnected && drawerOpener.focus) drawerOpener.focus({ preventScroll: true });
+  drawerOpener = null;
 }
 
 function appendLog(lines, force) {
@@ -961,11 +1025,11 @@ async function renderCosts(main) {
     </div>
     ${empty ? `<div class="card empty-state"><b>No runs in this range yet.</b><p class="hint">Every task and stand-up records its cost, tokens and time. Assign a task and it shows up here.</p></div>` : `
     <div class="viz-tiles">
-      <div class="card viz-hero"><span class="viz-label">Spend</span><span class="viz-hero-value">${usd(d.totals.cost)}</span><span class="hint">${d.range.from} to ${d.range.to}</span></div>
-      <div class="card viz-tile"><span class="viz-label">Runs</span><span class="viz-value">${d.totals.runs.toLocaleString()}</span><span class="hint">${d.totals.jobs} task(s) and stand-ups</span></div>
-      <div class="card viz-tile"><span class="viz-label">Cost per finished task</span><span class="viz-value">${d.finished.count ? usd(d.finished.costPerTask) : '—'}</span><span class="hint">${d.finished.count} finished</span></div>
-      <div class="card viz-tile"><span class="viz-label">Cache hit rate</span><span class="viz-value">${pct(d.totals.cacheHitRate)}</span><span class="hint">of prompt tokens read from cache</span></div>
-      <div class="card viz-tile"><span class="viz-label">Spent on failed or stopped work</span><span class="viz-value">${usd(d.wasted.cost)}</span><span class="hint">${pct(d.wasted.share)} of spend</span></div>
+      <div class="card viz-hero"><span class="viz-label">Spend</span><span class="viz-hero-value">${num(d.totals.cost, 'cost-spend', 'usd')}</span><span class="hint">${d.range.from} to ${d.range.to}</span></div>
+      <div class="card viz-tile"><span class="viz-label">Runs</span><span class="viz-value">${num(d.totals.runs, 'cost-runs')}</span><span class="hint">${d.totals.jobs} task(s) and stand-ups</span></div>
+      <div class="card viz-tile"><span class="viz-label">Cost per finished task</span><span class="viz-value">${d.finished.count ? num(d.finished.costPerTask, 'cost-per-task', 'usd') : '—'}</span><span class="hint">${d.finished.count} finished</span></div>
+      <div class="card viz-tile"><span class="viz-label">Cache hit rate</span><span class="viz-value">${num(d.totals.cacheHitRate, 'cost-cache', 'pct')}</span><span class="hint">of prompt tokens read from cache</span></div>
+      <div class="card viz-tile"><span class="viz-label">Spent on failed or stopped work</span><span class="viz-value">${num(d.wasted.cost, 'cost-wasted', 'usd')}</span><span class="hint">${pct(d.wasted.share)} of spend</span></div>
       <div class="card viz-tile"><span class="viz-label">Estimates in range</span><span class="viz-value">${est.count ? pct(est.withinRange) : '—'}</span><span class="hint">${est.count ? `${est.count} task(s); actual ${est.medianRatio.toFixed(2)}× the estimate (median)` : 'no estimated tasks yet'}</span></div>
     </div>
 
@@ -999,6 +1063,7 @@ async function renderCosts(main) {
       </section>
     </div>`}
     <div id="vizTip" class="viz-tip" role="tooltip" hidden></div>`;
+  animateNumbers(page);
 
   page.querySelectorAll('[data-cost-filter]').forEach(s => s.addEventListener('change', () => {
     costFilters[s.dataset.costFilter] = s.value;
@@ -1428,7 +1493,7 @@ function refreshDrawer(first) {
   const p = projOf(t.projectId);
   const r = roleOf(t.role);
   const repo = p && p.repos.find(x => x.name === t.repo);
-  $('#dHead').innerHTML = `<div class="line1">${roleChip(t.role)} <span style="color:var(--muted);font-size:12.5px">${esc(r.name)} · ${esc(p ? p.name : t.projectId)}</span><span class="grow"></span>${statusPill(t)}<button class="icon-btn" data-close aria-label="Close">✕</button></div><h2>${esc(t.title)}</h2>`;
+  $('#dHead').innerHTML = `<div class="line1">${roleChip(t.role)} <span style="color:var(--muted);font-size:12.5px">${esc(r.name)} · ${esc(p ? p.name : t.projectId)}</span><span class="grow"></span>${statusPill(t)}<button class="icon-btn" data-close aria-label="Close">✕</button></div><h2 id="dTitle">${esc(t.title)}</h2>`;
 
   const g = t.git;
   const cmds = repo && t.branch ? [
@@ -1616,7 +1681,7 @@ function refreshReportDrawer() {
   const r = S.reports.find(x => x.id === drawer.id);
   if (!r) return closeDrawer();
   const p = projOf(r.projectId);
-  $('#dHead').innerHTML = `<div class="line1"><span style="color:var(--muted);font-size:12.5px">Stand-up · ${esc(p ? p.name : r.projectId)}</span><span class="grow"></span><span class="pill ${r.status === 'failed' ? 'red' : 'blue'}">${esc(r.status)}</span><button class="icon-btn" data-close aria-label="Close">✕</button></div><h2>${esc(r.date)}</h2>`;
+  $('#dHead').innerHTML = `<div class="line1"><span style="color:var(--muted);font-size:12.5px">Stand-up · ${esc(p ? p.name : r.projectId)}</span><span class="grow"></span><span class="pill ${r.status === 'failed' ? 'red' : 'blue'}">${esc(r.status)}</span><button class="icon-btn" data-close aria-label="Close">✕</button></div><h2 id="dTitle">${esc(r.date)}</h2>`;
   $('#dInfo').innerHTML = r.error ? `<div class="err-box">${esc(r.error)}</div>` : r.status === 'done' ? '<p>Done. It is on the Stand-ups tab.</p>' : '';
   $('#dFoot').innerHTML = r.status === 'running' || r.status === 'queued' ? '<div class="acts"><button class="btn danger" data-report-cancel>Cancel</button></div>' : '';
 }
@@ -2030,10 +2095,28 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#peopleQ').focus(); $('#peopleQ').select(); }
 });
 document.addEventListener('keydown', e => {
+  const t = e.target;
+  if ((e.key === 'Enter' || e.key === ' ') && t instanceof HTMLElement && t.getAttribute('role') === 'button' && t.tagName !== 'BUTTON') {
+    e.preventDefault();
+    t.click();
+  }
+  if (e.key === 'Tab' && drawer && !document.querySelector('dialog[open]')) {
+    const box = $('#drawer');
+    const items = [...box.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])')].filter(x => x.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+document.addEventListener('keydown', e => {
   if (e.key !== 'Escape' || $('#assignDlg').open) return;
   if (drawer) closeDrawer(); else if (ui.card) closeAgentCard();
 });
 $('#assignBtn').addEventListener('click', () => openAssign());
+$('#skipLink').addEventListener('click', () => $('#main').focus());
 $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
 $('#standupAllBtn').addEventListener('click', async () => {
   if (!confirm(`Write a stand-up for all ${S.projects.length} projects now? Each one is a Claude run.`)) return;

@@ -169,8 +169,15 @@ café tables, plants everywhere, sofas, bean bags, and a play area with ping-pon
 A first version had a separate cafeteria, cricket ground and garden; one shared place keeps the
 crews together and the campus compact. Workers have emoji heads coloured by state (green free, red busy, amber review, purple needs
 attention), confetti when a task finishes, an office cat, and the overlay panels fold away.
-Still to do (part 2, the rest of the dashboard): the design system, transitions for drawers and
-pages, animated numbers, and the accessibility pass below.
+Done (part 2, the rest of the dashboard, on `feature/ui-polish`): shared tokens for spacing, type,
+radius and motion; one eased response for every control; drawers and dialogs that slide and fade;
+a short entrance on page changes (never on live updates); counters that count to their new value;
+and an accessibility pass: one visible keyboard focus style, a skip link, `aria-current` on the
+page and tab you're on, the task drawer as a labelled dialog that takes focus, keeps Tab inside
+and gives focus back, keyboard-openable feed rows and office name tags, errors announced at once,
+and muted text raised to WCAG AA contrast (it was below 3:1). Settings → Motion and the system's
+"reduce motion" both turn the movement off. Still open from the list below: the remaining 3D
+extras (handoff "ticket" walks, server rack, clock, focus lamp).
 
 **Goal:** a cleaner, calmer interface with purposeful motion and a better 3D office.
 

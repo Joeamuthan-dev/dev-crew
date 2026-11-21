@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <button class="skip-link" id="skipLink">Skip to content</button>
   <header class="topbar">
     <button class="icon-btn only-mobile" id="menuBtn" aria-label="Menu">☰</button>
     <a class="brand" href="#/office">
@@ -27,11 +28,11 @@
   </header>
 
   <div class="shell">
-    <nav class="sidebar" id="sidebar"></nav>
-    <main class="main" id="main"><div class="empty">Loading…</div></main>
+    <nav class="sidebar" id="sidebar" aria-label="Main"></nav>
+    <main class="main" id="main" tabindex="-1"><div class="empty">Loading…</div></main>
   </div>
 
-  <aside class="drawer" id="drawer" aria-hidden="true"></aside>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle" aria-hidden="true"></aside>
   <div class="scrim" id="scrim"></div>
 
   <dialog class="modal" id="assignDlg"></dialog>

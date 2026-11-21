@@ -255,6 +255,8 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   renderer.shadowMap.enabled = quality !== 'low';
   renderer.shadowMap.type = quality === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.domElement.className = 'office-canvas';
+  renderer.domElement.setAttribute('role', 'img');
+  renderer.domElement.setAttribute('aria-label', 'The 3D office. Tab to a name tag to open that person, floor or room; Settings has a simple 2D view.');
   host.appendChild(renderer.domElement);
 
   const labels = document.createElement('div');
@@ -583,6 +585,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   const hubLabel = document.createElement('div');
   hubLabel.className = 'ol-hub';
   hubLabel.addEventListener('click', () => onHub && onHub());
+  keyable(hubLabel);
   labels.appendChild(hubLabel);
   const builtStatic = [];
 
@@ -616,13 +619,16 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
   const W = (area, lx, lz) => { const [x, z] = rotXZ(lx, lz, area.rot); return new THREE.Vector3(area.pos.x + x, 0, area.pos.z + z); };
   const toLocal = (area, p) => rotXZ(p.x - area.pos.x, p.z - area.pos.z, -area.rot);
 
+// Name tags that open something are buttons for the keyboard too (Tab to them, Enter opens).
+  function keyable(el) { el.tabIndex = 0; el.setAttribute('role', 'button'); }
+
   const collect = root => { const out = []; root.traverse(o => { if (o.isMesh) out.push(o); }); return out; };
 
   function label(className, html, onClick) {
     const d = document.createElement('div');
     d.className = className;
     d.innerHTML = html;
-    if (onClick) d.addEventListener('click', onClick);
+    if (onClick) { d.addEventListener('click', onClick); keyable(d); }
     else d.style.pointerEvents = 'none';
     labels.appendChild(d);
     return d;
@@ -753,6 +759,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         lab.className = 'ol-agent';
         lab.style.setProperty('--rc', role.color);
         lab.addEventListener('click', () => onAgent && onAgent(p.id, roleId));
+        keyable(lab);
         labels.appendChild(lab);
         agentLabels.set(a.key, lab);
       });
@@ -760,6 +767,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       const zl = document.createElement('div');
       zl.className = 'ol-zone';
       zl.addEventListener('click', () => onZone && onZone(p.id));
+      keyable(zl);
       labels.appendChild(zl);
       zoneLabels.set(p.id, zl);
 
