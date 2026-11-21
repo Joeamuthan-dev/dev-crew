@@ -10,7 +10,15 @@
 // Click someone and the camera flies to them; they turn to you and wave, and the app pins a card.
 import * as THREE from '/vendor/three.module.min.js';
 
-const ROLE_ORDER = ['architect', 'frontend', 'backend', 'database', 'qa', 'devops'];
+// Desks follow the role list from the server (built-in roles first, then custom ones): two rows
+// facing each other, with as many columns as it takes, squeezed to fit inside the walkway.
+const deskRoles = (p, roles) => roles.filter(r => !p.activeRoles || !p.activeRoles.length || p.activeRoles.includes(r.id));
+function deskSpot(i, n) {
+  const cols = Math.max(3, Math.ceil(n / 2));
+  const spacing = Math.min(3.2, 7.6 / (cols - 1));
+  const c = i % cols;
+  return { x: (c - (cols - 1) / 2) * spacing, side: i < cols ? -1 : 1, scale: Math.min(1, spacing / 2.7) };
+}
 
 // one project floor (zone-local units; the back wall is at -z, the way out at +z)
 const ZONE_W = 12;
@@ -709,15 +717,15 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       zone.exitT = ringParam(ex, ez);
       zones.push(zone);
 
-      ROLE_ORDER.forEach((roleId, i) => {
-        // A role the project does not use gets no desk; the others keep their usual spot.
-        if (p.activeRoles && !p.activeRoles.includes(roleId)) return;
-        const role = roles.find(r => r.id === roleId) || { color: '#888', short: roleId, name: roleId };
-        const x = ((i % 3) - 1) * 3.2;
-        const side = i < 3 ? -1 : 1;
+      // A role the project does not use gets no desk.
+      const crew = deskRoles(p, roles);
+      crew.forEach((role, i) => {
+        const roleId = role.id;
+        const { x, side, scale } = deskSpot(i, crew.length);
         const desk = makeDesk(role.color, i);
         desk.group.position.set(x, FLOOR, side * 0.78);
         desk.group.rotation.y = side === -1 ? Math.PI : 0;
+        desk.group.scale.setScalar(scale);
         group.add(desk.group);
         const localFacing = side === -1 ? 0 : Math.PI;
         const chair = makeChair(role.color);
@@ -1352,7 +1360,8 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       M.field.color = dark ? new THREE.Color('#2f5a2f') : new THREE.Color('#86c46e');
     }
 
-    const key = S.projects.map(p => `${p.id}:${p.name}:${(p.activeRoles || []).join(',')}`).join('|');
+    const key = S.projects.map(p => `${p.id}:${p.name}:${(p.activeRoles || []).join(',')}`).join('|')
+      + '#' + S.roles.map(r => `${r.id}:${r.color}`).join(',');
     if (key !== zoneKey) { zoneKey = key; buildZones(S.projects, S.roles); }
 
     for (const z of zones) {
@@ -1381,7 +1390,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         z.boardMat.needsUpdate = true;
       }
 
-      for (const roleId of ROLE_ORDER) {
+      for (const { id: roleId } of S.roles) {
         const a = agents.get(`${z.id}:${roleId}`);
         if (!a) continue;
         const mine = tasks.filter(t => t.role === roleId);

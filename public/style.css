@@ -513,6 +513,12 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 .plan-first { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; padding: 9px 11px; border-radius: 8px; border: 1px dashed var(--line); }
 .plan-first span { color: var(--muted); }
 #assignForm.planning .not-planning, #assignForm.planning #baseField { display: none; }
+/* Code Reviewer / Conflict Fixer: their own branch fields instead of the kind-of-task choice. */
+#assignForm .kind-fields { display: none; }
+#assignForm.kind-is-review .kind-review, #assignForm.kind-is-conflicts .kind-conflicts { display: block; }
+#assignForm.kind-is-review .mode-field, #assignForm.kind-is-conflicts .mode-field { display: none; }
+#assignForm.planning .kind-fields { display: none; }
+.kind-fields .hint { margin: 0 0 8px; }
 .handoff { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; margin-top: 8px; display: grid; gap: 4px; font-size: 13px; }
 .handoff-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .handoff details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
@@ -647,3 +653,22 @@ code.perm { font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background:
   .people-pop { position: fixed; left: 16px; right: 16px; width: auto; top: 60px; }
 }
 @media (prefers-reduced-motion: reduce) { .ac.name-tag, .pc-name { animation: none; } }
+
+/* Code Reviewer findings and Conflict Fixer state (task drawer). */
+.verdict { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
+.verdict.ok { background: var(--green-soft); color: var(--green); }
+.verdict.info { background: var(--line); color: var(--muted); }
+.verdict.bad { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
+.findings { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 6px; }
+.finding { border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 6px; padding: 7px 10px; font-size: 13px; display: grid; gap: 3px; }
+.finding.sev-critical { border-left-color: var(--red); }
+.finding.sev-major { border-left-color: var(--amber); }
+.finding .sev { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.finding.sev-critical .sev { color: var(--red); }
+.finding.sev-major .sev { color: var(--amber); }
+.finding code { font-size: 12px; }
+.review-post { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.review-post input { width: 80px; }
+.ok-text { color: var(--green); }
+.d-section .warn { color: var(--amber); }
+.role-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; font-size: 13px; }
