@@ -1321,6 +1321,9 @@ function projectForm(dlg, p, oldId) {
         </select></div>
         <div class="field"><label>Extra allowed commands <span class="faint">(one per line)</span></label><textarea name="allowCommands" rows="2" placeholder="npm run e2e">${esc((p.allowCommands || []).join('\n'))}</textarea></div>
       </div>
+      <div class="field"><label>Knowledge graph <span class="faint">(from graphify; ${(() => { const g = Object.entries(p.graphs || {}); const have = g.filter(([, v]) => v).map(([k]) => k); return !g.length ? 'save the project first' : have.length ? `found in ${esc(have.join(', '))}` : 'no repo has a graphify-out folder yet: run graphify in it first'; })()})</span></label><select name="knowledgeGraph">
+        ${[['off', 'Off'], ['summary', 'Digest in the prompt (about 1,500 extra tokens a run)'], ['tools', 'Graph tools the agent can query (graphify-mcp)']].map(([v, l]) => `<option value="${v}" ${v === (p.knowledgeGraph || 'off') ? 'selected' : ''}>${l}</option>`).join('')}
+      </select><span class="hint">Measure before you keep it on: compare the same kind of task with and without it on the Costs page.</span></div>
       <div class="grid2">
         <div class="field"><label>Cost limit per run for this project <span class="faint">(USD, blank = app default)</span></label><input type="number" name="lim_budget" min="0" step="0.5" value="${lim.taskBudgetUsd ?? ''}"></div>
         <div class="field"><label>Time limit per run <span class="faint">(minutes, blank = app default)</span></label><input type="number" name="lim_time" min="0" step="5" value="${lim.taskTimeoutMin ?? ''}"></div>
@@ -1356,7 +1359,7 @@ function projectForm(dlg, p, oldId) {
     for (const r of S.roles) roles[r.id] = { repo: F[`repo_${r.id}`].value, model: F[`model_${r.id}`].value, notes: F[`notes_${r.id}`].value, limits: ((p.roles || {})[r.id] || {}).limits };
     const body = {
       id: F.id.value.trim(), name: F.name.value, folder: F.folder.value, stack: F.stack.value, context: F.context.value,
-      activeRoles, roles, handoffs: F.handoffs.value, allowCommands: F.allowCommands.value,
+      activeRoles, roles, handoffs: F.handoffs.value, knowledgeGraph: F.knowledgeGraph.value, allowCommands: F.allowCommands.value,
       limits: { ...(p.limits || {}), taskBudgetUsd: F.lim_budget.value, taskTimeoutMin: F.lim_time.value },
     };
     const btn = $('#cfgSave');
