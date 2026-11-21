@@ -2120,7 +2120,35 @@ document.addEventListener('keydown', e => {
 });
 $('#assignBtn').addEventListener('click', () => openAssign());
 $('#skipLink').addEventListener('click', () => $('#main').focus());
-$('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+// The side menu: on wide screens ☰ (or Ctrl+B) hides it for a full-width view and remembers
+// that choice in this browser; on small screens it slides in over the page.
+const NAV_KEY = 'devcrew.navCollapsed';
+const narrow = () => matchMedia('(max-width: 860px)').matches;
+function syncMenuBtn() {
+  const open = narrow() ? $('#sidebar').classList.contains('open') : !document.body.classList.contains('nav-collapsed');
+  const btn = $('#menuBtn');
+  btn.setAttribute('aria-expanded', String(open));
+  btn.setAttribute('aria-label', open ? 'Hide menu' : 'Show menu');
+  btn.title = `${open ? 'Hide' : 'Show'} menu (Ctrl+B)`;
+}
+function toggleMenu() {
+  if (narrow()) $('#sidebar').classList.toggle('open');
+  else {
+    const collapsed = document.body.classList.toggle('nav-collapsed');
+    try { localStorage.setItem(NAV_KEY, collapsed ? '1' : '0'); } catch { /* private window: not remembered */ }
+  }
+  syncMenuBtn();
+}
+try { if (localStorage.getItem(NAV_KEY) === '1') document.body.classList.add('nav-collapsed'); } catch { /* fine */ }
+syncMenuBtn();
+matchMedia('(max-width: 860px)').addEventListener('change', syncMenuBtn);
+$('#menuBtn').addEventListener('click', toggleMenu);
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && !document.querySelector('dialog[open]')) {
+    e.preventDefault();
+    toggleMenu();
+  }
+});
 $('#standupAllBtn').addEventListener('click', async () => {
   if (!confirm(`Write a stand-up for all ${S.projects.length} projects now? Each one is a Claude run.`)) return;
   try {
@@ -2145,7 +2173,7 @@ $('#themeBtn').addEventListener('click', async () => {
   try { await api('/api/settings', { method: 'PUT', body: { ui: { theme } } }); } catch (e) { toast(e.message, true); }
 });
 
-window.addEventListener('hashchange', () => { closeDrawer(); render(); window.scrollTo(0, 0); $('#sidebar').classList.remove('open'); });
+window.addEventListener('hashchange', () => { closeDrawer(); render(); window.scrollTo(0, 0); $('#sidebar').classList.remove('open'); syncMenuBtn(); });
 setInterval(() => { if (S) schedule(); }, 30000); // keep "5m ago" honest
 
 load().then(connect).catch(e => {

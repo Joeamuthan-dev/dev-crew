@@ -153,6 +153,10 @@ person), Escape closes the task panel and focus returns to where you were. Ctrl+
 should I ask?". Drawers, dialogs, page changes and counters animate briefly; Settings → Motion or
 your system's "reduce motion" setting turns that off.
 
+**Full-width view.** The ☰ button at the top left (or Ctrl+B) hides the side menu, so the office
+and every page use the whole window; press it again to bring the menu back. The browser remembers
+your choice. On a phone-sized window the same button slides the menu in over the page.
+
 ## Handoffs and plans
 
 **Handoffs.** When an agent finishes and another role must act for the work to be complete (new

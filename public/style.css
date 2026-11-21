@@ -747,3 +747,18 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; animation-delay: 0ms !important; }
 }
+
+/* Collapsible side menu: the ☰ button (or Ctrl+B) hides it so pages and the office get the full
+   width. On small screens the same button opens it over the page instead. */
+.shell { transition: grid-template-columns var(--dur-3) var(--ease); }
+@media (min-width: 861px) {
+  .sidebar { transition: opacity var(--dur-2) var(--ease), transform var(--dur-3) var(--ease), visibility 0s; }
+  body.nav-collapsed .shell { grid-template-columns: 0 1fr; }
+  body.nav-collapsed .sidebar {
+    width: 0; padding: 0; border-right: 0; overflow: hidden;
+    opacity: 0; transform: translateX(-24px); visibility: hidden;
+    transition: opacity var(--dur-2) var(--ease), transform var(--dur-3) var(--ease), visibility 0s linear var(--dur-3);
+  }
+  body.nav-collapsed .main:not(.full) { margin: 0 auto; }
+}
+#menuBtn[aria-expanded="false"] { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
