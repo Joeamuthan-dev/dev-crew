@@ -312,6 +312,9 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     deskGlow: new THREE.MeshBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.32, depthWrite: false, blending: THREE.AdditiveBlending }),
     rackFace: new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.3, metalness: 0.4 }),
     ticketHead: new THREE.MeshStandardMaterial({ color: '#6366f1', roughness: 0.6 }),
+    armchair: new THREE.MeshStandardMaterial({ color: '#0f766e', roughness: 0.8 }),
+    rug: new THREE.MeshStandardMaterial({ color: '#fde68a', roughness: 1 }),
+    steam: new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.4, depthWrite: false }),
     ink: new THREE.MeshStandardMaterial({ color: '#94a3b8', roughness: 0.9 }),
   };
   const CLOCK_FACE = canvasTex(256, 256, (g, W, H) => {
@@ -406,6 +409,42 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     flag.visible = false;
     g.add(flag);
     return { group: g, screens, lamp: { bulbMat, glow }, flag: { group: flag, cloth, mat: flagMat } };
+  }
+
+  /** A small armchair for the meeting corner; it faces local +z. */
+  function makeArmchair() {
+    const g = new THREE.Group();
+    const seat = slab(0.78, 0.7, 0.2, 0.12, M.armchair);
+    seat.position.y = 0.28;
+    g.add(seat);
+    const back = slab(0.78, 0.18, 0.5, 0.08, M.armchair);
+    back.position.set(0, 0.48, -0.3);
+    g.add(back);
+    for (const sx of [-0.36, 0.36]) {
+      const arm = slab(0.12, 0.66, 0.22, 0.05, M.armchair);
+      arm.position.set(sx, 0.46, 0.02);
+      g.add(arm);
+    }
+    for (const sx of [-0.3, 0.3]) for (const sz of [-0.26, 0.26]) g.add(cyl(0.03, 0.03, 0.28, M.dark, sx, 0.14, sz, 6));
+    return g;
+  }
+
+  /** A plant in a hanging pot, with vines trailing down; it hangs from its group's origin. */
+  function makeHangingPlant() {
+    const g = new THREE.Group();
+    g.add(cyl(0.008, 0.008, 0.3, M.dark, 0, -0.15, 0, 4));
+    g.add(cyl(0.16, 0.11, 0.18, M.pot, 0, -0.38, 0, 12));
+    g.add(ball(0.17, M.leaf, 0, -0.27, 0, 8));
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      const len = 0.35 + (k % 3) * 0.17;
+      const vine = new THREE.Mesh(geo(`vine${k % 3}`, () => new THREE.ConeGeometry(0.035, len, 4)), k % 2 ? M.leaf : M.leaf2);
+      vine.position.set(Math.cos(a) * 0.13, -0.42 - len / 2, Math.sin(a) * 0.13);
+      vine.rotation.x = Math.PI; // pointing down
+      g.add(vine);
+    }
+    g.userData.sway = true;
+    return g;
   }
 
   /** A server rack for each floor: LEDs that blink faster while the crew is running builds. */
@@ -821,6 +860,54 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       shelf.rotation.y = -Math.PI / 2;
       group.add(shelf);
 
+      // The meeting corner: a small annex off the front of the floor, on the side away from the
+      // path in, with two armchairs round a coffee table. Free people sit there for a chat.
+      const [entryX] = toLocal({ pos: zpos, rot }, new THREE.Vector3(0, 0, 0));
+      const cx = entryX > 0 ? -3.6 : 3.6;
+      const cz = ZONE_D / 2 + 0.95;
+      const annex = slab(4.6, 2.5, FLOOR, 0.45, floorMat);
+      annex.position.set(cx, 0, cz - 0.05);
+      const annexRim = slab(4.95, 2.85, 0.1, 0.6, rimMat);
+      annexRim.position.set(cx, 0, cz - 0.05);
+      const rug = slab(3.4, 1.7, 0.02, 0.35, M.rug);
+      rug.position.set(cx, FLOOR, cz);
+      group.add(annexRim, annex, rug);
+      for (const m of [annex, annexRim, rug]) { m.userData.pick = zonePick; pickables.push(m); }
+      group.add(cyl(0.42, 0.42, 0.05, M.oak, cx, FLOOR + 0.44, cz, 24));
+      group.add(cyl(0.05, 0.12, 0.42, M.dark, cx, FLOOR + 0.21, cz, 10));
+      group.add(cyl(0.07, 0.06, 0.1, M.white, cx + 0.12, FLOOR + 0.52, cz - 0.08, 10));
+      group.add(box(0.26, 0.02, 0.2, M.paper, cx - 0.12, FLOOR + 0.475, cz + 0.06, false));
+      const cornerSpots = [];
+      for (const side of [-1, 1]) {
+        const chair = makeArmchair();
+        const sx = cx + side * 1.15;
+        chair.position.set(sx, FLOOR, cz);
+        chair.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2; // facing the table
+        group.add(chair);
+        const facing = (side < 0 ? Math.PI / 2 : -Math.PI / 2) + rot;
+        cornerSpots.push({ kind: 'corner', x: sx + side * 0.12, z: cz, facing, taken: null, pose: 'chat' });
+      }
+
+      // Pendant lights over the desks: bright while anyone on the floor works, dim when it is idle.
+      const pendantMat = new THREE.MeshStandardMaterial({ color: '#fff7d6', emissive: '#ffe2a0', emissiveIntensity: 0.3 });
+      const poolMat = new THREE.MeshBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.08, depthWrite: false, blending: THREE.AdditiveBlending });
+      for (const px of [-3.2, 0, 3.2]) {
+        group.add(cyl(0.012, 0.012, 1.3, M.dark, px, FLOOR + 3.15, 0, 4));
+        group.add(cyl(0.05, 0.05, 0.08, M.dark, px, FLOOR + 2.5, 0, 10));
+        group.add(cyl(0.09, 0.3, 0.22, pendantMat, px, FLOOR + 2.37, 0, 16));
+        const pool = new THREE.Mesh(geo('pool', () => new THREE.CircleGeometry(1.2, 28)), poolMat);
+        pool.rotation.x = -Math.PI / 2;
+        pool.position.set(px, FLOOR + 0.035, 0);
+        group.add(pool);
+      }
+
+      // Hanging plants from the top rail of the back wall.
+      for (const hx of [-ZONE_W / 2 + 1.1, ZONE_W / 2 - 1.3]) {
+        const hp = makeHangingPlant();
+        hp.position.set(hx, FLOOR + 1.88, bz + 0.2);
+        group.add(hp);
+      }
+
       const rack = makeRack();
       rack.group.position.set(-ZONE_W / 2 + 0.5, FLOOR, -1.7);
       rack.group.rotation.y = Math.PI / 2;
@@ -829,7 +916,9 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       wallClock.group.position.set(0, FLOOR + 1.45, bz + 0.05);
       group.add(wallClock.group);
 
-      const zone = { id: p.id, kind: 'zone', ang, pos: zpos, rot, group, rimMat, floorMat, boardMat, boardSig: '', cooler: [RING_A + 0.2, -RING_B - 0.55], rack, clock: wallClock, running: 0 };
+      const zone = { id: p.id, kind: 'zone', ang, pos: zpos, rot, group, rimMat, floorMat, boardMat, boardSig: '', cooler: [RING_A + 0.2, -RING_B - 0.55], rack, clock: wallClock, running: 0,
+        corner: { x: cx, z: cz, spots: cornerSpots }, lights: { pendantMat, poolMat, level: 0.2 } };
+      for (const s of cornerSpots) { s.zone = zone; s.pos = W(zone, s.x, s.z); }
       const [ex, ez] = toLocal(zone, new THREE.Vector3(0, 0, 0));
       zone.exitT = ringParam(ex, ez);
       zones.push(zone);
@@ -954,6 +1043,15 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     machine.add(box(0.4, 0.08, 0.3, M.metal, 0, 0.12, 0.1));
     machine.position.set(-7.4, 1.06, -6.15);
     pl.group.add(machine);
+    // steam from the machine: puffs that rise and fade, more of them while people are at the café
+    pl.steam = [];
+    for (let k = 0; k < 8; k++) {
+      const mat = M.steam.clone();
+      const puff = ball(0.07, mat, -7.4 + (k % 2 ? 0.08 : -0.06), 1.8, -6.1, 8);
+      puff.castShadow = false;
+      pl.group.add(puff);
+      pl.steam.push({ mesh: puff, mat, phase: k / 8 });
+    }
     for (let k = 0; k < 4; k++) pl.group.add(cyl(0.06, 0.05, 0.12, M.white, -6.5 + k * 0.3, 1.12, -5.9, 10));
     pl.group.add(box(1.0, 2.0, 0.8, M.white, -9.2, 1.0, -6.1));
     pl.group.add(box(0.04, 0.8, 0.04, M.metal, -8.8, 1.2, -5.68));
@@ -1181,7 +1279,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     const path = [];
     release(a);
     const inZone = a.where === 'zone';
-    if (dest.kind === 'seat' || dest.kind === 'ring' || dest.kind === 'cooler') {
+    if (dest.kind === 'seat' || dest.kind === 'ring' || dest.kind === 'cooler' || dest.kind === 'corner') {
       let t0;
       if (inZone) t0 = toRing(a, path);
       else {
@@ -1196,6 +1294,12 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         path.push(W(z, a.seat.x, a.seat.z));
       } else if (dest.kind === 'ring') {
         for (const [x, zz] of ringPath(t0, dest.t)) path.push(W(z, x, zz));
+      } else if (dest.kind === 'corner') {
+        const sp = dest.spot;
+        sp.taken = a;
+        a.spot = sp;
+        for (const [x, zz] of ringPath(t0, ringParam(sp.x, RING_B))) path.push(W(z, x, zz));
+        path.push(W(z, sp.x, ZONE_D / 2 - 0.3), sp.pos.clone());
       } else {
         const t = ringParam(z.cooler[0], z.cooler[1]);
         for (const [x, zz] of ringPath(t0, t)) path.push(W(z, x, zz));
@@ -1242,6 +1346,14 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       const s = freeSpot(STAND_SEATS);
       if (s && Math.random() < 0.8) return { kind: 'spot', spot: s };
     }
+    const corner = a.zone && a.zone.corner;
+    if (corner) {
+      const waiting = corner.spots.some(sp => sp.taken && sp.taken.arrived);
+      if (Math.random() < (waiting ? 0.5 : 0.12)) {
+        const sp = freeSpot(corner.spots);
+        if (sp) return { kind: 'corner', spot: sp, stay: rand(16, 30) };
+      }
+    }
     const r = Math.random();
     const L = places.lounge;
     if (L && r < 0.25) {
@@ -1271,6 +1383,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     for (const z of zones) {
       const [lx, lz] = toLocal(z, p);
       if (Math.abs(lx) < ZONE_W / 2 && Math.abs(lz) < ZONE_D / 2) return FLOOR;
+      if (z.corner && Math.abs(lx - z.corner.x) < 2.3 && lz > 0 && lz < z.corner.z + 1.2) return FLOOR;
     }
     for (const pl of Object.values(places)) {
       const [lx, lz] = toLocal(pl, p);
@@ -1390,6 +1503,13 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       a.pose = d.spot.pose;
       a.sitGoal = d.spot.sit ? 1 : 0;
       a.timer = d.stay || rand(8, 16);
+    } else if (d.kind === 'corner') {
+      a.where = 'zone';
+      a.loc = 'corner';
+      a.arrived = true;
+      a.pose = 'chat';
+      a.sitGoal = 1;
+      a.timer = d.stay || rand(14, 26);
     } else if (d.kind === 'cooler') {
       a.where = 'zone';
       a.loc = 'spot';
@@ -1565,7 +1685,7 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
         else if (a.state === 'failed') text = `<b>${esc(role.short)}</b> needs attention: ${esc(last.title)}`;
         else if (rv) text = `<b>${esc(role.short)}</b> ${rv} to review`;
         else if (queued) text = `<b>${esc(role.short)}</b> ${queued} queued`;
-        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ lounge: a.pose === 'pong' ? 'playing ping-pong' : a.pose === 'foos' ? 'playing foosball' : a.pose === 'chat' ? 'chatting in the lounge' : 'at the café', plaza: 'taking a walk', room: 'in the stand-up room' }[a.where] || ''}` : ''}`;
+        else text = `<b>${esc(role.short)}</b> ${esc(role.name)}${a.where !== 'zone' ? ` · ${{ lounge: a.pose === 'pong' ? 'playing ping-pong' : a.pose === 'foos' ? 'playing foosball' : a.pose === 'chat' ? 'chatting in the lounge' : 'at the café', plaza: 'taking a walk', room: 'in the stand-up room' }[a.where] || ''}` : a.loc === 'corner' ? ' · chatting in the meeting corner' : ''}`;
         if (lab.innerHTML !== text) lab.innerHTML = text;
         lab.dataset.state = a.state;
         lab.title = run ? `${role.name}: ${run.title}` : `${role.name} — click to talk`;
@@ -1600,7 +1720,10 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
     applyCamera();
     const pts = [];
     const corners = (area, w, d) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) for (const y of [0, 2.8]) pts.push(W(area, (sx * w) / 2, (sz * d) / 2).setY(y)); };
-    for (const z of zones) corners(z, ZONE_W, ZONE_D);
+    for (const z of zones) {
+      corners(z, ZONE_W, ZONE_D);
+      if (z.corner) for (const sx of [-2.3, 2.3]) pts.push(W(z, z.corner.x + sx, z.corner.z + 1.2).setY(0));
+    }
     for (const pl of Object.values(places)) corners(pl, pl.width, pl.depth);
     for (const a of [0, 1, 2, 3]) pts.push(new THREE.Vector3(Math.cos(a * Math.PI / 2) * PLAZA_R, 3.5, Math.sin(a * Math.PI / 2) * PLAZA_R));
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -1800,6 +1923,31 @@ export function createOffice(host, { onAgent, onZone, onHub, quality = 'high' })
       a.flag.group.visible = !!flagColor;
       if (flagColor && a.flagColor !== flagColor) { a.flag.mat.color.set(flagColor); a.flagColor = flagColor; }
       if (flagColor) a.flag.cloth.rotation.y = still ? 0 : Math.sin(t * 3 + a.phase) * 0.3;
+    }
+
+    // pendant lights: bright while anyone on the floor works or has work queued, dim when idle
+    for (const z of zones) {
+      let busy = false;
+      for (const a of agents.values()) if (a.zone === z && (a.state === 'working' || a.state === 'queued')) { busy = true; break; }
+      const goal = busy ? 1 : 0.15;
+      const L = z.lights;
+      L.level = off ? goal : L.level + (goal - L.level) * Math.min(1, dt * 1.5);
+      L.pendantMat.emissiveIntensity = 0.15 + L.level * 1.3;
+      L.poolMat.opacity = 0.03 + L.level * 0.22;
+    }
+    const lounge = places.lounge;
+    if (lounge && lounge.steam) {
+      const brewing = lounge.spots.some(sp => sp.pose === 'cafe' && sp.taken && sp.taken.arrived);
+      for (const p of lounge.steam) {
+        const k = (t * 0.42 + p.phase) % 1;
+        const show = !still && (brewing || p.phase < 0.3);
+        p.mesh.visible = show;
+        if (!show) continue;
+        p.mesh.position.y = 1.8 + k * 0.75;
+        p.mesh.position.x = -7.4 + Math.sin((p.phase + k) * 6) * 0.06;
+        p.mesh.scale.setScalar(0.6 + k * 1.4);
+        p.mat.opacity = 0.45 * (1 - k) * Math.min(1, k * 6);
+      }
     }
 
     // server racks blink faster while the floor's crew is running; clocks keep the local time
