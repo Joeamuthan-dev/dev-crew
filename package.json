@@ -8,6 +8,7 @@
     "start": "node server.mjs",
     "demo": "node scripts/make-demo.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "graph-trial": "node scripts/graph-trial.mjs",
     "test": "node --test"
   },
   "engines": {

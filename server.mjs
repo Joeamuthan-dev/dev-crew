@@ -20,6 +20,7 @@ import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHA
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
 import { detectProject, findRepos } from './lib/detect.mjs';
+import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules } from './lib/graph.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -228,6 +229,31 @@ function recordRun(job, res, model, kind) {
   job.wallMs = (job.wallMs || 0) + (s.wallMs || 0);
 }
 
+/**
+ * The project's knowledge graph for one run (project option "knowledgeGraph"): a digest in the
+ * system prompt ("summary"), or graphify's read-only graph tools over MCP ("tools").
+ */
+function graphContext(p, repo, t, tmpDir) {
+  const out = { block: '', mcp: '', tools: [] };
+  const mode = p.knowledgeGraph || 'off';
+  if (mode === 'off') return out;
+  const where = repo || (p.repos.length === 1 ? p.repos[0] : null);
+  const g = where && findGraph(where.path);
+  if (!g) {
+    log(t.id, 'warn', `The knowledge graph is on for ${p.name}, but ${where ? where.name : 'this task'} has no graphify-out folder. Run graphify there first; this run goes without it.`);
+    return out;
+  }
+  if (mode === 'summary' && g.report) {
+    out.block = graphPromptBlock('summary', { digest: graphDigest(fs.readFileSync(g.report, 'utf8')), builtAt: g.builtAt });
+  } else if (mode === 'tools' && g.graph) {
+    out.mcp = writeMcpConfig(g.graph, tmpDir);
+    out.tools = graphToolRules();
+    out.block = graphPromptBlock('tools', { builtAt: g.builtAt });
+  }
+  if (out.block) log(t.id, 'sys', `Using the knowledge graph of ${where.name} (${mode === 'tools' ? 'graph tools' : 'digest in the prompt'})`);
+  return out;
+}
+
 function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'task';
 }
@@ -302,11 +328,15 @@ async function execTask(t, handle) {
     if (limits.taskBudgetUsd > 0 && !(await claudeFeatures(cfg.settings.claudeCommand)).maxBudget) {
       log(t.id, 'warn', 'This Claude Code version has no --max-budget-usd, so the per-task cost limit cannot be enforced. Update with: claude update');
     }
+    const graphCtx = graphContext(p, repo, t, TMP);
     const run = runClaude({
       command: cfg.settings.claudeCommand,
       cwd,
       prompt,
+      mcpConfig: graphCtx.mcp,
+      extraTools: graphCtx.tools,
       systemPrompt: taskSystemPrompt(p, t.role, t.mode, {
+        graph: graphCtx.block,
         cwd, branch: t.branch, base: t.base, readFrom,
         prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
         handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) ? 'off' : policyFor(p),
@@ -332,7 +362,10 @@ async function execTask(t, handle) {
     handle.kill = run.kill;
     if (handle.cancelled) run.kill();
     const unwatch = watchTimeout(t, limits, handle);
-    const res = await run.done.finally(unwatch);
+    const res = await run.done.finally(() => {
+      unwatch();
+      if (graphCtx.mcp) fs.rmSync(graphCtx.mcp, { force: true });
+    });
     if (res.budgetHit) handle.limitHit = 'budget';
 
     if (res.sessionId) t.sessionId = res.sessionId;
@@ -574,6 +607,8 @@ const publicProject = p => ({
   repos: p.repos.map(r => ({ name: r.name, path: r.path, exists: r.exists })), roles: p.roles,
   handoffs: policyFor(p),
   activeRoles: p.activeRoles,
+  knowledgeGraph: p.knowledgeGraph,
+  graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
 
 async function stateView() {

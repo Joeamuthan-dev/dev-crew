@@ -320,6 +320,29 @@ and backed up like project edits) and applied straight away, without a restart:
 
 The workspace folder and the port are shown but changed in the file (they need a restart).
 
+## Knowledge graph (optional)
+
+If you have run [graphify](https://pypi.org/project/graphifyy/) in a repo (it leaves a
+`graphify-out/` folder), agents can use that graph of the code. Turn it on per project in **Edit
+project → Knowledge graph** (or `"knowledgeGraph"` in the config). It is off by default.
+
+- **Digest in the prompt** (`"summary"`): a short summary of `GRAPH_REPORT.md` (the most connected
+  classes and one line per area of the code) goes into every run's instructions. About 1,500 extra
+  tokens per run.
+- **Graph tools** (`"tools"`): the agent gets graphify's read-only graph tools (query the graph,
+  look up a class and its neighbours, the path between two classes) through `graphify-mcp`. It
+  needs graphify's MCP extra: `uv tool install "graphifyy[mcp]"`. The PR tools graphify also
+  offers stay off.
+
+The graph is a snapshot: re-run `graphify update <repo>` (no LLM needed) after big changes.
+
+**Measure it before you keep it on.** `npm run graph-trial -- --project <id>` runs the same three
+read-only questions on a repo with no graph, with the digest and with the graph tools, and writes
+a comparison (cost, prompt tokens, turns, time, searches) plus every answer to
+`data/graph-trial/`. Each run is a paid Claude Code session; `--budget` caps each run (default
+$1.50) and `--max-total` the whole trial (default $10). Your own questions go in a JSON list with
+`--questions file.json`.
+
 ## Keep it running
 
 The stand-ups only happen while the server runs. To start it automatically when you log in to
@@ -388,6 +411,8 @@ starting again; the task panel lets you raise the limit that was hit (it suggest
 server.mjs          queue, scheduler, API, live events
 lib/roles.mjs       the built-in roles, custom roles from the config
 lib/review.mjs      the Code Reviewer's verdict and findings, and posting them with gh
+lib/graph.mjs       knowledge-graph context from graphify (digest or graph tools)
+scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
 lib/git.mjs         worktrees, branch summaries, repo activity

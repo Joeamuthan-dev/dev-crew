@@ -306,6 +306,41 @@ helps.
      system prompt.
 3. **If it doesn't help**, drop it and record why in this file.
 
+### First trial (2026-11-21, `feature/knowledge-graph`)
+
+Built so it could be measured: the per-project option (`"knowledgeGraph": "off" | "summary" |
+"tools"`, off by default), and `npm run graph-trial`, which runs the same read-only questions
+with and without the graph. Run on DataEz (`DataEzapi`, a 2,714-node graph), Sonnet, three
+questions (a codebase map, every database access that bypasses `DQ_DATABASEContext`, and the
+impact of changing the most central class), each in all three variants. The nine runs cost
+$1.59.
+
+| Variant | Median cost | Median prompt tokens | Median turns | Median time | Graph tool calls |
+|---|---|---|---|---|---|
+| No graph | $0.231 | 235k | 9 | 49s | – |
+| Digest in the prompt | $0.140 (−39%) | 168k (−28%) | 6 | 42s | – |
+| Graph tools | $0.162 (−30%) | 161k (−31%) | 6 | 60s | **0** |
+
+What it shows, and what it does not:
+
+- **The graph tools were never used.** The server connected and the tools were offered (checked
+  at the start of each run), but in all three runs Sonnet went straight to `docs/PROJECT_OVERVIEW.md`
+  and grep. In one run it loaded the tools and then still didn't call them. So the "tools" savings
+  are not the graph's doing: they are run-to-run variation, or the instruction to look before you
+  search.
+- **The digest looks promising but is not proven.** It was cheaper on two of three questions, with
+  answers of the same quality (the same raw-SQL sites found in question 2, with correct file and
+  line references). But three runs a variant is too few: a single run differs by up to 2× in
+  turns. The no-graph runs also checked more call sites by reading more files.
+- **DataEz is a hard case for a graph:** it already has a good written overview
+  (`docs/PROJECT_OVERVIEW.md`) that every agent read first, which is most of what the graph offers.
+
+**Decision:** keep both modes opt-in and off by default (no change for anyone who does not turn
+them on). Do not turn them on for DataEz yet. Next step, only if wanted: a larger digest-only
+trial (5–6 questions, each run twice with and without, about $3–4) before enabling the digest. The
+graph-tools mode stays available, but would need a stronger instruction or a tool-first task style
+before it can save anything.
+
 ---
 
 ## Open questions
