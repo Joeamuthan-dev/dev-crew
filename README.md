@@ -113,7 +113,13 @@ The dashboard opens on a 3D office campus:
 - **One floor per project** around it: desks with dual monitors (code scrolling while working, a
   tick when a branch waits for review, a warning when a task failed), the project's sign and a
   whiteboard with its queued, running and review work as sticky notes, plants, a printer, a
-  bookshelf and a water cooler. Roles a project does not use get no desk.
+  bookshelf, a water cooler, a wall clock with your local time, and a server rack whose lights
+  blink faster while the crew is running. Every desk has a **focus lamp** that lights up while
+  its owner works, and a **flag** that goes up when a branch waits for your review (amber) or the
+  last task failed (purple). Roles a project does not use get no desk.
+- **Handoffs you can see:** when a task hands work to another role, or a plan starts its steps,
+  the person who finished picks up a ticket, walks it over to the next desk and hands it over;
+  the receiver waves.
 - **One big café & lounge** where free people from every project meet: a coffee counter, café
   tables under pendant lamps, plants everywhere (trees in big pots, planter boxes, a tree with a
   round bench), sofas and bean bags, and a small play area where two people play a ping-pong

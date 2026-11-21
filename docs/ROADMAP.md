@@ -176,8 +176,13 @@ and an accessibility pass: one visible keyboard focus style, a skip link, `aria-
 page and tab you're on, the task drawer as a labelled dialog that takes focus, keeps Tab inside
 and gives focus back, keyboard-openable feed rows and office name tags, errors announced at once,
 and muted text raised to WCAG AA contrast (it was below 3:1). Settings → Motion and the system's
-"reduce motion" both turn the movement off. Still open from the list below: the remaining 3D
-extras (handoff "ticket" walks, server rack, clock, focus lamp).
+"reduce motion" both turn the movement off. Then, on `feature/office-extras`: a focus lamp on
+every desk that lights while its owner works, a review flag on the desk (amber for a branch to
+review, purple when the last task failed), a server rack per floor whose lights blink faster
+while the crew runs, a wall clock with the local time, and handoffs walked over: when a task hands
+work to another role (or a plan starts its steps), the one who finished carries a ticket to the
+next desk and hands it over. Not done from the list below: a meeting corner, ceiling lights that
+dim, hanging plants, and a coffee machine's steam.
 
 **Goal:** a cleaner, calmer interface with purposeful motion and a better 3D office.
 
