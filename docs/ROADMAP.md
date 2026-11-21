@@ -246,7 +246,13 @@ A separate **Costs** page, built from the run data recorded in phase 0.
 - **Charts library:** use a small charting library vendored into `public/vendor` (as three.js is
   today), so there's still no build step.
 
-## 8. New roles: PR Conflict Fixer and Code Reviewer
+## 8. New roles: PR Conflict Fixer and Code Reviewer — done on `feature/new-roles`
+
+Shipped: roles are data (`lib/roles.mjs` holds the built-in eight; a top-level `"roles"` list in
+the config adds custom roles or changes built-in ones), the office lays out one desk per active
+role, the Code Reviewer returns a verdict and findings and posts them to a GitHub pull request
+only on click (`gh pr review`), and the Conflict Fixer merges the target into its own branch made
+from the PR branch. Still to do: posting to Azure DevOps and Bitbucket. The original plan follows.
 
 First, move roles into config, so they're data instead of being hard-coded in `roles.mjs`. The
 six current roles become the defaults, and you can add custom roles. The office gets one desk per

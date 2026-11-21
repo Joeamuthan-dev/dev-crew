@@ -4,7 +4,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig, refreshRepos } from './lib/config.mjs';
-import { ROLES, roleById } from './lib/roles.mjs';
+import { ROLES, roleById, roleKind } from './lib/roles.mjs';
+import { parseReview, reviewMarkdown, postReview } from './lib/review.mjs';
 import * as G from './lib/git.mjs';
 import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
 import { settingsFromForm, maskSettings } from './lib/settings.mjs';
@@ -44,6 +45,8 @@ for (const r of S.reports) {
   if (r.status === 'running' || r.status === 'queued') { r.status = 'failed'; r.error = 'Interrupted: the server stopped before this report finished.'; }
 }
 const project = id => cfg.projects.find(p => p.id === id);
+// A role can leave the config (a custom one removed) while old tasks still name it.
+const roleName = id => (roleById(id) || {}).name || id;
 const todayStr = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // The very first start counts as today's run, so installing doesn't fire five reports at once.
@@ -242,6 +245,19 @@ async function execTask(t, handle) {
     // task reads its worktree. Resolved now, because a plan's earlier steps only get branches
     // when they run.
     const prev = t.prevId ? taskById(t.prevId) : null;
+    const role = roleById(t.role);
+    if (!role) throw new Error(`The role "${t.role}" is no longer in the config.`);
+    const kind = role.kind || '';
+    // A review handed on from another task reviews that task's branch.
+    if (kind === 'review' && !(t.review && t.review.branch) && prev && prev.branch) {
+      t.review = { branch: prev.branch, base: prev.base || '', prNumber: '' };
+    }
+    // Remote branches move: fetch before a review or a merge that names one.
+    if (repo && !t.sessionId && ((kind === 'review' && t.review) || (kind === 'conflicts' && t.mergeTarget))) {
+      const refs = kind === 'review' ? [t.review.branch, t.review.base] : [t.mergeTarget, t.base];
+      if (refs.some(r => String(r).startsWith('origin/')) && await G.fetchOrigin(repo.path)) log(t.id, 'sys', 'Fetched the latest branches from origin');
+    }
+    if (kind === 'conflicts' && t.mergeTarget && repo && !(await G.refExists(repo.path, t.mergeTarget))) throw new Error(`The branch to merge in, ${t.mergeTarget}, no longer exists.`);
     const sp = startPoint(prev, t.mode, t.repo);
     if (t.mode === 'change' && !t.worktree && !t.base && sp.base) t.base = sp.base;
     const readFrom = t.mode === 'analyze' && sp.readFrom && fs.existsSync(sp.readFrom) ? sp.readFrom : '';
@@ -293,10 +309,12 @@ async function execTask(t, handle) {
       systemPrompt: taskSystemPrompt(p, t.role, t.mode, {
         cwd, branch: t.branch, base: t.base, readFrom,
         prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
-        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH ? 'off' : policyFor(p),
+        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) ? 'off' : policyFor(p),
         plan: !!t.planTask,
+        review: t.review, mergeTarget: t.mergeTarget,
       }),
       mode: t.mode,
+      kind,
       extraCommands: p.allowCommands,
       model,
       resume,
@@ -331,6 +349,19 @@ async function execTask(t, handle) {
       (t.history = t.history || []).push({ at: Date.now(), prompt: followup || t.title, result: res.result });
     }
     if (t.mode === 'change' && t.baseSha) t.git = await G.branchSummary(repo.path, t.baseSha, t.branch, t.worktree);
+    if (kind === 'review' && t.review && res.result) {
+      const found = parseReview(res.result);
+      if (found) t.review = { ...t.review, result: found, posted: null };
+      else log(t.id, 'warn', 'The review had no "## Review" block, so there is nothing to post. The report is still below.');
+    }
+    if (kind === 'conflicts' && t.mergeTarget && t.worktree) {
+      // Did the merge land? A half-finished merge is reported, never left looking done.
+      const unfinished = await G.mergeInProgress(t.worktree);
+      const merged = !unfinished && await G.isAncestor(t.worktree, t.mergeTarget, 'HEAD');
+      t.merge = { state: unfinished ? 'unfinished' : merged ? 'merged' : 'not-merged', at: Date.now() };
+      if (unfinished) log(t.id, 'warn', 'The merge is not finished: conflicts are still open in the worktree. Send a follow-up to finish it, or assign it again.');
+      else if (merged) log(t.id, 'sys', `${t.branch} now contains ${t.mergeTarget}.`);
+    }
     t.stopReason = '';
     if (handle.cancelled) { t.status = 'cancelled'; t.error = 'Cancelled.'; }
     else if (handle.limitHit) {
@@ -340,6 +371,10 @@ async function execTask(t, handle) {
         ? `Stopped at the $${limits.taskBudgetUsd} cost limit for this run. Press Continue to resume with a new allowance.`
         : `Stopped at the ${limits.taskTimeoutMin}-minute time limit for this run. Press Continue to resume.`;
       log(t.id, 'warn', t.error);
+    }
+    else if (res.ok && t.merge && t.merge.state === 'unfinished') {
+      t.status = 'failed';
+      t.error = 'The merge was left half-finished. Send a follow-up to finish it, or abort it with a new task.';
     }
     else if (res.ok) { t.status = 'done'; takeNextSteps(t, p, res.result); }
     else { t.status = 'failed'; t.error = res.error; log(t.id, 'err', res.error); }
@@ -363,14 +398,14 @@ async function execReport(r, handle) {
     const tasks = S.tasks
       .filter(t => t.projectId === p.id && (t.createdAt > since || t.status === 'queued' || t.status === 'running'))
       .map(t => ({
-        role: roleById(t.role).name, title: t.title, status: t.status, branch: t.branch,
+        role: roleName(t.role), title: t.title, status: t.status, branch: t.branch,
         commits: t.git ? t.git.commits.length : 0, summary: t.summary, error: t.status === 'failed' ? t.error : '',
       }));
     const repos = [];
     for (const rp of p.repos) repos.push({ name: rp.name, ...(await G.recentActivity(rp.path)) });
     const board = monday.snapshot().boards[p.id];
     const tickets = board ? board.items.filter(i => !/^done$/i.test(i.status)).slice(0, 40).map(i => ({
-      roles: i.roles.map(x => roleById(x).name), name: i.name, status: i.status, due: i.due, people: i.people,
+      roles: i.roles.map(x => roleName(x)), name: i.name, status: i.status, due: i.due, people: i.people,
     })) : [];
     log(r.id, 'sys', `Gathered ${tasks.length} task(s), ${tickets.length} open ticket(s) and activity from ${repos.length} repo(s)`);
 
@@ -607,7 +642,7 @@ function startHandoff(parent, h) {
     parentId: parent.id, prevId: parent.id, dependsOn: [parent.id], chainDepth: (parent.chainDepth || 0) + 1, origin: 'handoff',
   });
   Object.assign(h, { status: 'started', taskId: child.id });
-  log(parent.id, 'sys', `Handed off to the ${roleById(h.role).name}: "${h.title}"`);
+  log(parent.id, 'sys', `Handed off to the ${roleName(h.role)}: "${h.title}"`);
   return child;
 }
 
@@ -670,11 +705,41 @@ async function createTask(b) {
   if (!p) throw new Error('Unknown project.');
   if (!roleById(b.role)) throw new Error('Unknown role.');
   const plan = b.plan === true || b.plan === 'on' || b.plan === 'true';
-  if (!plan && !p.activeRoles.includes(b.role)) throw new Error(`${p.name} has no ${roleById(b.role).name}. Turn the role on in the project's settings first.`);
-  const mode = plan ? 'analyze' : b.mode === 'analyze' ? 'analyze' : 'change';
-  const title = String(b.title || '').trim();
-  if (!title) throw new Error('Give the task a title.');
+  if (!plan && !p.activeRoles.includes(b.role)) throw new Error(`${p.name} has no ${roleName(b.role)}. Turn the role on in the project's settings first.`);
+  const kind = plan ? '' : roleKind(b.role);
+  // The Code Reviewer only reads; the Conflict Fixer always changes (it commits a merge).
+  const mode = plan || kind === 'review' ? 'analyze' : kind === 'conflicts' ? 'change' : b.mode === 'analyze' ? 'analyze' : 'change';
+  let title = String(b.title || '').trim();
   refreshRepos(p);
+  const special = {};
+  if (kind === 'review' || kind === 'conflicts') {
+    const repo = p.repos.find(r => r.name === String(b.repo || '').trim()) || (p.repos.length === 1 ? p.repos[0] : null);
+    if (!repo) throw new Error('Pick the repo that holds the branch.');
+    if (b.fetch !== false) await G.fetchOrigin(repo.path);
+    const need = async (v, what) => {
+      const ref = G.cleanRef(v);
+      if (!ref) throw new Error(`Give the ${what}.`);
+      const found = await G.resolveRef(repo.path, ref);
+      if (!found) throw new Error(`There is no branch "${ref}" in ${repo.name}.`);
+      return found;
+    };
+    if (kind === 'review') {
+      const branch = await need(b.reviewBranch, 'branch to review');
+      const base = b.reviewBase ? await need(b.reviewBase, 'base branch') : (await G.resolveRef(repo.path, 'main')) || (await G.resolveRef(repo.path, 'master'));
+      if (!base) throw new Error('Give the base branch to compare with.');
+      const pr = String(b.prNumber || '').trim().replace(/^#/, '');
+      const prNumber = /^\d{1,7}$/.test(pr) ? pr : '';
+      special.review = { branch, base, prNumber };
+      if (!title) title = `Review ${prNumber ? `PR #${prNumber} (${branch})` : branch}`;
+    } else {
+      special.base = await need(b.fixBranch || b.base, 'branch to fix');
+      special.mergeTarget = await need(b.mergeTarget, 'branch to merge in');
+      if (special.base === special.mergeTarget) throw new Error('The branch to fix and the branch to merge in are the same.');
+      if (!title) title = `Merge ${special.mergeTarget} into ${special.base} and fix the conflicts`;
+    }
+    b.repo = repo.name;
+  }
+  if (!title) throw new Error('Give the task a title.');
   let repoName = String(b.repo || '').trim();
   if (plan && !repoName) repoName = '*';
   if (repoName === '*' && mode === 'change') throw new Error('Pick one repo for a task that changes code.');
@@ -692,8 +757,9 @@ async function createTask(b) {
     details = `monday.com ticket "${d.name}"${d.url ? ` (${d.url})` : ''}\n${cols}${ups ? `\n\nLatest updates on the ticket:\n${ups}` : ''}${details ? `\n\nFrom the owner:\n${details}` : ''}`;
   }
   return createTaskFromSpec({
-    projectId: p.id, role: plan ? 'architect' : b.role, mode, repo: repoName, base: String(b.base || '').trim(),
+    projectId: p.id, role: plan ? 'architect' : b.role, mode, repo: repoName, base: special.base || G.cleanRef(b.base),
     title, details, model: String(b.model || ''), ticket,
+    review: special.review || null, mergeTarget: special.mergeTarget || '',
     // Per-task overrides from the Assign dialog; blank fields fall back to role/project/app limits.
     limits: cleanLimits({ taskBudgetUsd: b.budgetUsd, taskTimeoutMin: b.timeoutMin }),
     planTask: plan, origin: 'owner',
@@ -708,6 +774,7 @@ function createTaskFromSpec(spec, { deferPump = false } = {}) {
     ticket: spec.ticket || null, limits: spec.limits || {},
     planTask: !!spec.planTask, parentId: spec.parentId || '', prevId: spec.prevId || '', dependsOn: spec.dependsOn || [],
     chainDepth: spec.chainDepth || 0, origin: spec.origin || 'owner', planKey: spec.planKey || '',
+    review: spec.review || null, mergeTarget: spec.mergeTarget || '',
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
   };
   // Kept so the cost page can later compare what we expected with what happened.
@@ -759,7 +826,7 @@ async function route(req, res, url) {
     const p = project(url.searchParams.get('project'));
     const repo = p && p.repos.find(r => r.name === url.searchParams.get('repo'));
     if (!repo) return send(res, 404, { error: 'Unknown repo.' });
-    return send(res, 200, { current: await G.currentBranch(repo.path), branches: await G.localBranches(repo.path) });
+    return send(res, 200, { current: await G.currentBranch(repo.path), branches: await G.localBranches(repo.path), remote: await G.remoteBranches(repo.path) });
   }
 
   if (m === 'POST' && url.pathname === '/api/tasks') return send(res, 200, await createTask(await readBody(req)));
@@ -822,6 +889,33 @@ async function route(req, res, url) {
       touchTask(t);
       return send(res, 200, { task: t, child });
     }
+    // /api/tasks/:id/review/post {prNumber, event}: post the Code Reviewer's findings on the
+    // pull request with the GitHub CLI. Only ever on the owner's click.
+    if (m === 'POST' && action === 'review' && parts[4] === 'post') {
+      const b = await readBody(req);
+      if (!t.review || !t.review.result) return send(res, 400, { error: 'This task has no review to post.' });
+      const p = project(t.projectId);
+      const repo = p && p.repos.find(r => r.name === t.repo);
+      if (!repo) return send(res, 400, { error: `Repo "${t.repo}" was not found.` });
+      const pr = String(b.prNumber || t.review.prNumber || '').trim().replace(/^#/, '');
+      const event = ['comment', 'approve', 'request_changes'].includes(b.event) ? b.event : 'comment';
+      try {
+        const out = await postReview({
+          repoPath: repo.path, prNumber: pr, event,
+          body: reviewMarkdown(t.review.result, { branch: t.review.branch, base: t.review.base }),
+        });
+        t.review.prNumber = pr;
+        t.review.posted = { at: Date.now(), event, url: out.url || '' };
+        log(t.id, 'sys', `Review posted on pull request #${pr}${out.url ? ` (${out.url})` : ''}.`);
+        touchTask(t);
+        return send(res, 200, t);
+      } catch (e) {
+        const msg = /not found|ENOENT/i.test(e.message) && !/pull request/i.test(e.message)
+          ? 'The GitHub CLI (gh) was not found. Install it and run gh auth login.'
+          : e.message;
+        return send(res, 400, { error: `Could not post the review: ${msg}` });
+      }
+    }
     // /api/tasks/:id/plan/start|dismiss
     if (m === 'POST' && action === 'plan' && (parts[4] === 'start' || parts[4] === 'dismiss')) {
       if (!t.plan) return send(res, 404, { error: 'This task has no plan.' });
@@ -841,7 +935,7 @@ async function route(req, res, url) {
     if (m === 'POST' && action === 'monday-update') {
       if (!t.ticket) return send(res, 400, { error: 'This task is not linked to a monday.com ticket.' });
       if (!t.result) return send(res, 400, { error: 'There is no report to post yet.' });
-      const lines = [`<b>${roleById(t.role).name} (Dev Crew)</b>: ${t.status === 'done' ? 'finished' : t.status}`, '', (t.summary || '').replace(/\n/g, '<br>')];
+      const lines = [`<b>${roleName(t.role)} (Dev Crew)</b>: ${t.status === 'done' ? 'finished' : t.status}`, '', (t.summary || '').replace(/\n/g, '<br>')];
       if (t.branch) lines.push('', `Branch: ${t.branch}${t.git ? ` (${t.git.commits.length} commit(s), ${t.git.shortstat || 'no changes'})` : ''}. Not pushed yet; waiting for review.`);
       const r = await monday.postUpdate(t.projectId, t.ticket.itemId, lines.join('<br>'));
       t.ticket.postedAt = Date.now();

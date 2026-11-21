@@ -1110,9 +1110,15 @@ async function renderSettings(main) {
         <p class="hint">The token is stored in <code>crew.config.local.json</code> and never shown again here. Board ids are set per project.</p>
       </section>
 
+      <section class="card set-sec"><h2>Roles <span class="faint">(read-only)</span></h2>
+        <p class="hint">Every project gets these seats; turn them on or off per project in Edit project. Add your own, or change a built-in one, with a <code>"roles"</code> list in <code>crew.config.local.json</code>, for example <code>{"id": "security", "name": "Security Engineer", "color": "#e11d48", "defaultMode": "analyze", "prompt": "You are the Security Engineer…"}</code>, then restart.</p>
+        <ul class="role-list">${S.roles.map(r => `<li>${roleChip(r.id)} <b>${esc(r.name)}</b> <span class="faint">· ${r.defaultMode === 'analyze' ? 'reads' : 'changes code'}${r.kind === 'review' ? ' · reviews branches and pull requests' : r.kind === 'conflicts' ? ' · may run git merge in its own worktree' : ''}${r.builtIn ? '' : ' · custom'}</span>${r.focus ? `<div class="faint">${esc(r.focus)}</div>` : ''}</li>`).join('')}</ul>
+      </section>
+
       <section class="card set-sec"><h2>Permissions <span class="faint">(read-only)</span></h2>
         <p class="hint">What agents may run. Anything else is refused and shown in the task log.</p>
         <h4>Make changes</h4><div class="perm-list">${chips(d.permissions.change)}</div>
+        <h4>Conflict Fixer, in addition</h4><div class="perm-list">${chips(['git merge'])}</div>
         <h4>Investigate &amp; report</h4><div class="perm-list">${chips(d.permissions.analyze)}</div>
         <h4>Always refused</h4><div class="perm-list">${chips(d.permissions.denied)}</div>
         ${d.permissions.projects.some(p => p.extra.length) ? `<h4>Extra, per project</h4>${d.permissions.projects.filter(p => p.extra.length).map(p => `<div><b>${esc(p.name)}</b>: ${chips(p.extra)}</div>`).join('')}` : ''}
@@ -1430,6 +1436,10 @@ function refreshDrawer(first) {
     ['See the diff', `git -C "${repo.path}" diff ${(t.baseSha || '').slice(0, 10)}...${t.branch}`],
     ['When you are happy, push it yourself', `git -C "${repo.path}" push -u origin ${t.branch}`],
   ] : [];
+  // Live updates rebuild the drawer: keep what the owner is typing into the review form.
+  const keepPr = $('#revPr') ? $('#revPr').value : null;
+  const keepEvent = $('#revEvent') ? $('#revEvent').value : null;
+  const prFocused = document.activeElement && document.activeElement.id === 'revPr';
   $('#dInfo').innerHTML = `
     <dl class="kv">
       <dt>Mode</dt><dd>${t.mode === 'change' ? 'Changes code on its own branch' : 'Read-only investigation'}</dd>
@@ -1448,10 +1458,13 @@ function refreshDrawer(first) {
         ${g.commits.length ? `<div class="commits">${esc(g.commits.join('\n'))}</div>` : ''}
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
+    ${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
     ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
-    ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.result)}</div>` : ''}
+    ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.review && t.review.result ? t.result.replace(/\n##\s*Review\s*\n[\s\S]*$/i, '') : t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
 
+  if (keepPr !== null && $('#revPr')) { $('#revPr').value = keepPr; if (prFocused) $('#revPr').focus(); }
+  if (keepEvent !== null && $('#revEvent')) $('#revEvent').value = keepEvent;
   const active = t.status === 'running' || t.status === 'queued';
   const canFollow = !active && !t.cleaned;
   const foot = $('#dFoot');
@@ -1485,6 +1498,63 @@ function refreshDrawer(first) {
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) taskAction('followup'); });
   }
   if (first && ta && t.status !== 'failed') ta.blur();
+}
+
+/* ---------------- Code Reviewer and Conflict Fixer (task drawer) ---------------- */
+
+const VERDICTS = { approve: ['Looks good', 'ok'], comment: ['Comments', 'info'], request_changes: ['Changes requested', 'bad'] };
+const SEV_ICON = { critical: '⛔', major: '▲', minor: '●', nit: '·' };
+
+function reviewHtml(t) {
+  const rv = t.review;
+  if (!rv) return '';
+  const head = `<p class="hint">Branch <code>${esc(rv.branch)}</code> against <code>${esc(rv.base || '?')}</code>${rv.prNumber ? ` · pull request #${esc(rv.prNumber)}` : ''}</p>`;
+  if (!rv.result) return `<div class="d-section"><h4>Review</h4>${head}${t.status === 'done' ? '<p class="hint">No structured review came back; see the report.</p>' : ''}</div>`;
+  const r = rv.result;
+  const [vtext, vcls] = VERDICTS[r.verdict] || VERDICTS.comment;
+  const counts = {};
+  for (const f of r.findings) counts[f.severity] = (counts[f.severity] || 0) + 1;
+  const countText = Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(' · ') || 'no findings';
+  const rows = r.findings.map(f => `<li class="finding sev-${f.severity}">
+      <div class="f-top"><span class="sev" title="${f.severity}">${SEV_ICON[f.severity] || '●'} ${f.severity}</span> <b>${esc(f.title)}</b>${f.file ? ` <code>${esc(f.file)}${f.line ? ':' + f.line : ''}</code>` : ''}</div>
+      ${f.detail ? `<div>${esc(f.detail)}</div>` : ''}
+      ${f.suggestion ? `<div class="faint"><i>Suggestion:</i> ${esc(f.suggestion)}</div>` : ''}
+    </li>`).join('');
+  const posted = rv.posted
+    ? `<p class="hint">Posted on pull request #${esc(rv.prNumber)} ${ago(rv.posted.at)}${rv.posted.url ? ` · <a href="${esc(rv.posted.url)}" target="_blank" rel="noopener">open</a>` : ''}.</p>`
+    : '';
+  const post = `<div class="review-post">
+      <label>PR # <input type="text" id="revPr" inputmode="numeric" value="${esc(rv.prNumber || '')}" placeholder="123"></label>
+      <select id="revEvent"><option value="comment">As a comment</option><option value="request_changes" ${r.verdict === 'request_changes' ? '' : ''}>Request changes</option><option value="approve">Approve</option></select>
+      <button class="btn sm primary" data-review-post>${rv.posted ? 'Post again' : 'Post on the pull request'}</button>
+    </div><p class="hint">Uses the GitHub CLI (<code>gh</code>) with your own login. GitHub does not let you approve or request changes on your own pull request; post those as a comment.</p>`;
+  return `<div class="d-section"><h4>Review <span class="verdict ${vcls}">${vtext}</span></h4>${head}
+    ${r.summary ? `<p>${esc(r.summary)}</p>` : ''}
+    <p class="faint">${countText}</p>
+    ${rows ? `<ul class="findings">${rows}</ul>` : ''}
+    ${posted}${t.status === 'done' ? post : ''}</div>`;
+}
+
+function mergeHtml(t, repo) {
+  if (!t.mergeTarget) return '';
+  const st = t.merge && t.merge.state;
+  const text = st === 'merged' ? `<b class="ok-text">Merged.</b> <code>${esc(t.branch)}</code> is <code>${esc(t.base)}</code> with <code>${esc(t.mergeTarget)}</code> merged in.`
+    : st === 'unfinished' ? '<b class="warn">The merge is not finished.</b> Conflicts are still open in the worktree.'
+      : st === 'not-merged' ? `<b class="warn">Not merged.</b> The Conflict Fixer stopped without merging; its report says why.`
+        : `Merges <code>${esc(t.mergeTarget)}</code> into <code>${esc(t.base)}</code>.`;
+  const local = String(t.base || '').replace(/^origin\//, '');
+  const cmds = st === 'merged' && repo && t.branch ? [
+    ['Update the pull request branch to the fixed one (it only adds commits)', `git -C "${repo.path}" push origin ${t.branch}:${local}`],
+  ] : [];
+  return `<div class="d-section"><h4>Conflicts</h4><p>${text}</p>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>`;
+}
+
+/** "Ask for a review" under a finished change task, when the project has a Code Reviewer. */
+function reviewAsk(t) {
+  if (t.mode !== 'change' || !t.branch || t.status !== 'done' || roleOf(t.role).kind) return '';
+  const rev = crewRoles(projOf(t.projectId)).find(r => r.kind === 'review');
+  if (!rev) return '';
+  return `<div class="d-section"><button class="btn sm" data-review-branch="${esc(t.id)}">Ask the ${esc(rev.name)} to review this branch</button></div>`;
 }
 
 /* ---------------- handoffs, plans and chains (task drawer) ---------------- */
@@ -1604,7 +1674,7 @@ function openAssign(pre = {}) {
       <label class="check plan-first"><input type="checkbox" name="plan"> <span><b>Plan it first</b> · the Solutions Architect breaks this feature into linked tasks for the crew. You review the plan, then start it.</span></label>
       <div class="field not-planning"><label>Who</label>
         <div class="role-pick" id="rolePick">${rolePick(projectId, role)}</div></div>
-      <div class="field not-planning"><label>Kind of task</label>
+      <div class="field not-planning mode-field"><label>Kind of task</label>
         <div class="mode-pick">
           <label><input type="radio" name="mode" value="change" ${mode === 'change' ? 'checked' : ''}><b>Make changes</b><span>Works on its own new branch and commits. Never pushes.</span></label>
           <label><input type="radio" name="mode" value="analyze" ${mode === 'analyze' ? 'checked' : ''}><b>Investigate &amp; report</b><span>Read-only: review, plan, audit, explain.</span></label>
@@ -1612,6 +1682,22 @@ function openAssign(pre = {}) {
       <div class="grid2">
         <div class="field"><label>Repo</label><select name="repo"></select></div>
         <div class="field" id="baseField"><label>Start from branch</label><select name="base"></select></div>
+      </div>
+      <datalist id="branchList"></datalist>
+      <div class="kind-fields kind-review">
+        <p class="hint">The Code Reviewer reads the branch's changes against its base and lists findings by file and line. It never changes code. You can post the review on the pull request afterwards.</p>
+        <div class="grid3">
+          <div class="field"><label>Branch to review</label><input type="text" name="reviewBranch" list="branchList" autocomplete="off" spellcheck="false" placeholder="feature/login or origin/feature/login" value="${esc(pre.reviewBranch || '')}"></div>
+          <div class="field"><label>Compare with</label><input type="text" name="reviewBase" list="branchList" autocomplete="off" spellcheck="false" placeholder="main" value="${esc(pre.reviewBase || '')}"></div>
+          <div class="field"><label>Pull request <span style="font-weight:400;color:var(--faint)">(optional)</span></label><input type="text" name="prNumber" inputmode="numeric" placeholder="#123"></div>
+        </div>
+      </div>
+      <div class="kind-fields kind-conflicts">
+        <p class="hint">The Conflict Fixer makes its own branch from the branch you pick, merges the other branch into it and resolves the conflicts, then builds and tests. Your branch is not touched: you move the pull request to the fixed branch yourself.</p>
+        <div class="grid2">
+          <div class="field"><label>Branch to fix (the PR branch)</label><input type="text" name="fixBranch" list="branchList" autocomplete="off" spellcheck="false" placeholder="feature/login"></div>
+          <div class="field"><label>Merge in</label><input type="text" name="mergeTarget" list="branchList" autocomplete="off" spellcheck="false" placeholder="origin/main"></div>
+        </div>
       </div>
       ${pre.ticketId ? `<div class="linked">Linked to the monday.com ticket <b>${esc(pre.ticketName || '')}</b>. The agent reads the ticket and its latest updates.<input type="hidden" name="ticketId" value="${esc(pre.ticketId)}"></div>` : ''}
       <div class="field"><label>Task</label><input type="text" name="title" maxlength="200" required placeholder="e.g. Add pagination to GET /invoices" value="${esc(pre.title || '')}"></div>
@@ -1638,15 +1724,28 @@ function openAssign(pre = {}) {
   const form = $('#assignForm');
   const F = form.elements;
   let modeTouched = !!pre.mode;
+  // Code Reviewer and Conflict Fixer: their own fields, a fixed kind of task, one repo.
+  const kindOf = () => (F.plan.checked ? '' : roleOf(F.role.value).kind || '');
+  const applyKind = () => {
+    const k = kindOf();
+    form.classList.toggle('kind-is-review', k === 'review');
+    form.classList.toggle('kind-is-conflicts', k === 'conflicts');
+    if (k) form.querySelector(`input[name=mode][value=${k === 'review' ? 'analyze' : 'change'}]`).checked = true;
+    F.title.required = !k;
+    F.title.placeholder = k === 'review' ? 'Optional: "Review <branch>" when blank'
+      : k === 'conflicts' ? 'Optional: "Merge … and fix the conflicts" when blank'
+      : F.plan.checked ? 'e.g. Let users export validation results to Excel' : 'e.g. Add pagination to GET /invoices';
+  };
   const fillRepos = () => {
+    applyKind();
     const p = projOf(F.projectId.value);
     const roleRepo = (p.roles[F.role.value] || {}).repo;
     const want = pre.repo && pre.repo !== '*' ? pre.repo : roleRepo;
-    const analyze = F.mode.value === 'analyze';
+    const analyze = F.mode.value === 'analyze' && !kindOf();
     const opts = p.repos.map(r => `<option value="${esc(r.name)}" ${r.name === want ? 'selected' : ''}>${esc(r.name)}</option>`);
     if (analyze) opts.unshift(`<option value="*" ${pre.repo === '*' || !want ? 'selected' : ''}>Whole project (all repos)</option>`);
     F.repo.innerHTML = opts.join('') || '<option value="">No repos found</option>';
-    $('#baseField').style.display = analyze ? 'none' : '';
+    $('#baseField').style.display = analyze || kindOf() ? 'none' : '';
     fillBranches();
   };
   const fillBranches = async () => {
@@ -1658,6 +1757,11 @@ function openAssign(pre = {}) {
       const b = await api(`/api/branches?project=${encodeURIComponent(p.id)}&repo=${encodeURIComponent(repo)}`);
       F.base.innerHTML = b.branches.filter(x => !x.startsWith('agent/')).map(x => `<option value="${esc(x)}" ${x === b.current ? 'selected' : ''}>${esc(x)}${x === b.current ? ' (checked out)' : ''}</option>`).join('')
         || '<option value="">Current branch</option>';
+      // Reviews and merges also pick from the crew's own branches and the remote ones.
+      $('#branchList').innerHTML = [...b.branches, ...(b.remote || [])].map(x => `<option value="${esc(x)}">`).join('');
+      const main = ['origin/main', 'origin/master', 'main', 'master'].find(x => b.branches.includes(x) || (b.remote || []).includes(x)) || '';
+      if (!F.reviewBase.value) F.reviewBase.placeholder = main || 'main';
+      if (!F.mergeTarget.value) F.mergeTarget.placeholder = main || 'origin/main';
     } catch { /* keep the default */ }
   };
   // Default limits follow the project / role until the owner edits them. The estimate is on
@@ -1736,7 +1840,6 @@ function openAssign(pre = {}) {
       if (arch) arch.checked = true; // the server gives plans to the Architect either way
       form.querySelector('input[name=mode][value=analyze]').checked = true;
     }
-    F.title.placeholder = on ? 'e.g. Let users export validation results to Excel' : 'e.g. Add pagination to GET /invoices';
     fillRepos();
     markStale();
     fillLimits();
@@ -1769,6 +1872,9 @@ function openAssign(pre = {}) {
     if (e.submitter && e.submitter.value === 'cancel') return;
     e.preventDefault();
     const body = Object.fromEntries(new FormData(form));
+    // Blank "compare with" / "merge in" fields mean the suggested branch shown as the hint.
+    if (kindOf() === 'review' && !body.reviewBase) body.reviewBase = F.reviewBase.placeholder === 'main' ? '' : F.reviewBase.placeholder;
+    if (kindOf() === 'conflicts' && !body.mergeTarget) body.mergeTarget = F.mergeTarget.placeholder;
     const btn = $('#assignSubmit');
     btn.disabled = true;
     try {
@@ -1827,6 +1933,26 @@ document.addEventListener('click', async e => {
   }
   const hk = e.target.closest('[data-hk]');
   if (hk) return housekeepingAction(hk.dataset.hk);
+  const rb = e.target.closest('[data-review-branch]');
+  if (rb) {
+    const t = S.tasks.find(x => x.id === rb.dataset.reviewBranch);
+    const rev = t && crewRoles(projOf(t.projectId)).find(r => r.kind === 'review');
+    if (t && rev) openAssign({ projectId: t.projectId, role: rev.id, repo: t.repo, reviewBranch: t.branch, reviewBase: t.base });
+    return;
+  }
+  if (e.target.closest('[data-review-post]') && drawer) {
+    const pr = ($('#revPr').value || '').trim().replace(/^#/, '');
+    const ev = $('#revEvent').value;
+    if (!/^\d+$/.test(pr)) { $('#revPr').focus(); return toast('Type the pull request number', true); }
+    const what = { comment: 'as a comment', approve: 'as an approval', request_changes: 'as "request changes"' }[ev];
+    if (!confirm(`Post this review on pull request #${pr} ${what}, from your GitHub account?`)) return;
+    const btn = e.target.closest('[data-review-post]');
+    btn.disabled = true;
+    try { await api(`/api/tasks/${drawer.id}/review/post`, { method: 'POST', body: { prNumber: pr, event: ev } }); toast('Review posted'); }
+    catch (err) { toast(err.message, true); }
+    finally { btn.disabled = false; }
+    return;
+  }
   // Handoff and plan buttons in the task drawer.
   const hb = e.target.closest('[data-handoff],[data-plan]');
   if (hb && drawer) {

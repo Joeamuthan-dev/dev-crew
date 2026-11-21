@@ -161,6 +161,41 @@ as **Blocked**, and go back in the queue once it is done (for example after **Co
 
 The task panel's **Chain** section shows where a task came from and what came after it.
 
+## Roles
+
+Every project gets eight seats: Solutions Architect, Frontend, Backend, Database, QA / Test,
+DevOps & Cloud, and two that work on branches and pull requests:
+
+- **Code Reviewer** reviews any branch (yours, a teammate's or a crew branch) against its base,
+  read-only. Pick it in the Assign dialog and give the branch, what to compare with (default
+  `main`) and, optionally, the pull request number, or press **Ask the Code Reviewer to review
+  this branch** under a finished change task. It is also a handoff target, so Backend → QA →
+  Reviewer works. The task panel shows its verdict (looks good, comments, changes requested) and
+  findings by file and line, most severe first. **Post on the pull request** posts them with the
+  GitHub CLI (`gh pr review`), from your own GitHub login, only when you click it.
+- **Conflict Fixer** brings a pull request branch up to date. Give the branch to fix and the one
+  to merge in (for example `origin/main`; Dev Crew fetches first). It makes its own branch from
+  yours, merges, resolves the conflicts keeping both sides' intent, then builds and tests. It is
+  the only role allowed to run `git merge` (and `git merge --abort` when a conflict needs a
+  person); it still cannot push. Your branch is never touched: the task panel gives the command to
+  move the pull request branch to the fixed one. A merge left half-finished shows as failed.
+
+**Custom roles.** Add a top-level `"roles"` list to `crew.config.local.json` to add your own
+seats or change a built-in one (only the fields you give change), then restart:
+
+```json
+"roles": [
+  { "id": "security", "name": "Security Engineer", "short": "SEC", "color": "#e11d48",
+    "defaultMode": "analyze", "focus": "Threat models, auth, secrets, dependency risk.",
+    "prompt": "You are the Security Engineer for this project. ..." },
+  { "id": "qa", "name": "Test Lead" }
+]
+```
+
+New roles are on for every project unless the project lists `activeRoles`; turn them on or off
+in **Edit project**. The office adds a desk per role (desks get closer together as the crew
+grows), and Settings → Roles lists them all.
+
 ## Housekeeping
 
 Press **Housekeeping** at the bottom of the sidebar. It shows what can go and why, before
@@ -335,7 +370,8 @@ starting again; the task panel lets you raise the limit that was hit (it suggest
 
 ```
 server.mjs          queue, scheduler, API, live events
-lib/roles.mjs       the six roles and their instructions (edit to tune them)
+lib/roles.mjs       the built-in roles, custom roles from the config
+lib/review.mjs      the Code Reviewer's verdict and findings, and posting them with gh
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
 lib/git.mjs         worktrees, branch summaries, repo activity

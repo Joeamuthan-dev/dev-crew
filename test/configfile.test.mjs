@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { projectFromForm, upsertProject, removeProject, peopleFromForm, folderForConfig } from '../lib/configfile.mjs';
 import { parseConfig } from '../lib/config.mjs';
+import { ROLE_IDS } from '../lib/roles.mjs';
 
 const ws = path.resolve('/work');
 
@@ -27,8 +28,11 @@ test('projectFromForm builds a clean project and keeps fields the editor does no
 });
 
 test('all roles active is written as the default (no activeRoles key)', () => {
-  const p = projectFromForm({ id: 'x', activeRoles: ['architect', 'frontend', 'backend', 'database', 'qa', 'devops'] }, {}, ws);
+  const p = projectFromForm({ id: 'x', activeRoles: [...ROLE_IDS] }, {}, ws);
   assert.equal(p.activeRoles, undefined);
+  // the six original roles are no longer all of them, so that list is kept
+  const six = projectFromForm({ id: 'x', activeRoles: ['architect', 'frontend', 'backend', 'database', 'qa', 'devops'] }, {}, ws);
+  assert.equal(six.activeRoles.length, 6);
 });
 
 test('folderForConfig is relative inside the workspace, absolute outside', () => {
