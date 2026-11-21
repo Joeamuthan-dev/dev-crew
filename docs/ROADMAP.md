@@ -181,8 +181,11 @@ every desk that lights while its owner works, a review flag on the desk (amber f
 review, purple when the last task failed), a server rack per floor whose lights blink faster
 while the crew runs, a wall clock with the local time, and handoffs walked over: when a task hands
 work to another role (or a plan starts its steps), the one who finished carries a ticket to the
-next desk and hands it over. Not done from the list below: a meeting corner, ceiling lights that
-dim, hanging plants, and a coffee machine's steam.
+next desk and hands it over. Last, on `feature/office-corner`: a meeting corner off the front of
+every floor (two armchairs round a coffee table, where free people sit for a chat), pendant
+lights over the desks that are bright while anyone on the floor works and dim when it is idle,
+hanging plants on the back wall, and steam from the café's coffee machine (more of it while
+people are at the counter). With that, the Phase 6 list is done.
 
 **Goal:** a cleaner, calmer interface with purposeful motion and a better 3D office.
 

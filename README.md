@@ -120,10 +120,14 @@ The dashboard opens on a 3D office campus:
 - **Handoffs you can see:** when a task hands work to another role, or a plan starts its steps,
   the person who finished picks up a ticket, walks it over to the next desk and hands it over;
   the receiver waves.
+- **Each floor also has** a meeting corner by the way in (two armchairs and a coffee table, where
+  free teammates sit and chat), pendant lights over the desks that brighten while anyone on the
+  floor is working and dim when the floor is idle, and plants hanging from the back wall.
 - **One big café & lounge** where free people from every project meet: a coffee counter, café
   tables under pendant lamps, plants everywhere (trees in big pots, planter boxes, a tree with a
   round bench), sofas and bean bags, and a small play area where two people play a ping-pong
-  rally or a game of foosball. An office cat wanders about.
+  rally or a game of foosball. The coffee machine steams, more while people are at the counter.
+  An office cat wanders about.
 
 Every crew member has an **emoji head** that shows how they are doing, and a shirt in their
 role's colour:
