@@ -267,6 +267,7 @@ function route() {
   if (parts[0] === 'p' && parts[1]) return { view: 'project', id: parts[1], tab: parts[2] || 'crew' };
   if (parts[0] === 'today') return { view: 'today' };
   if (parts[0] === 'settings') return { view: 'settings' };
+  if (parts[0] === 'costs') return { view: 'costs' };
   return { view: 'office' };
 }
 
@@ -284,6 +285,8 @@ function render() {
   if (officeEl && main.contains(officeEl)) main.replaceChildren();
   // The Settings page is drawn once per visit, so live updates never wipe a half-edited form.
   if (r.view === 'settings') { if (!$('#settingsPage')) renderSettings(main); return; }
+  // Drawn on arrival and when a filter changes, not on every live update (hover state stays put).
+  if (r.view === 'costs') { if (!$('#costsPage')) renderCosts(main); return; }
   const scroll = window.scrollY;
   if (r.view === 'project' && projOf(r.id)) main.innerHTML = projectView(projOf(r.id), r.tab);
   else if (r.view === 'office') main.innerHTML = office2dView();
@@ -321,6 +324,7 @@ function renderSidebar() {
   $('#sidebar').innerHTML = `
     <a class="nav-item ${r.view === 'office' ? 'active' : ''}" href="#/office"><span class="grow">Office</span></a>
     <a class="nav-item ${r.view === 'today' ? 'active' : ''}" href="#/today"><span class="grow">Today</span></a>
+    <a class="nav-item ${r.view === 'costs' ? 'active' : ''}" href="#/costs"><span class="grow">Costs</span></a>
     <a class="nav-item ${r.view === 'settings' ? 'active' : ''}" href="#/settings"><span class="grow">Settings</span></a>
     <div class="nav-label">Projects</div>
     ${items || '<div class="empty">No projects yet.</div>'}
@@ -840,6 +844,178 @@ function appendLog(lines, force) {
   const atBottom = force || box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   box.insertAdjacentHTML('beforeend', lines.map(l => `<div class="l ${l.kind}">${esc(l.text)}</div>`).join(''));
   if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------------- costs page ---------------- */
+
+const costFilters = { range: '30', project: '', role: '', model: '' };
+const FAILED_STATUS = new Set(['failed', 'cancelled', 'stopped', 'blocked']);
+
+const usd = n => (n >= 1000 ? `$${Math.round(n).toLocaleString()}` : `$${n.toFixed(2)}`);
+const compact = n => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e4 ? `${(n / 1e3).toFixed(0)}K` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(Math.round(n)));
+const pct = n => `${Math.round(n * 100)}%`;
+
+function costRange() {
+  const today = new Date();
+  const key = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (costFilters.range === 'all') return { from: '', to: key(today) };
+  if (costFilters.range === 'month') return { from: key(new Date(today.getFullYear(), today.getMonth(), 1)), to: key(today) };
+  const from = new Date(today);
+  from.setDate(from.getDate() - (Number(costFilters.range) - 1));
+  return { from: key(from), to: key(today) };
+}
+
+/** Round axis maximum and step: 0 / 0.5 / 1 … with 3–5 ticks. */
+function niceScale(max) {
+  if (!(max > 0)) return { top: 1, step: 0.25 };
+  const raw = max / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  return { top: Math.ceil(max / step - 1e-9) * step, step };
+}
+
+/** Spend per day: one series of columns, 4px rounded tops, hairline grid, optional limit line. */
+function dailyChart(daily, limit) {
+  const W = 760, H = 220, L = 50, R = 12, T = 16, B = 26;
+  const maxCost = Math.max(...daily.map(d => d.cost), 0);
+  // the daily limit is drawn only when it is near the data, so it never flattens the columns
+  const showLimit = limit > 0 && limit <= Math.max(maxCost * 3, 0.01);
+  const { top, step } = niceScale(Math.max(maxCost, showLimit ? limit : 0));
+  const y = v => T + (H - T - B) * (1 - v / top);
+  const band = (W - L - R) / daily.length;
+  const bw = Math.max(2, Math.min(24, band * 0.62));
+  const ticks = [];
+  for (let v = 0; v <= top + 1e-9; v += step) ticks.push(v);
+  const labelEvery = Math.ceil(daily.length / 8);
+  const fmtTick = v => (top < 1 ? `$${v.toFixed(2)}` : top < 10 ? `$${Number.isInteger(v) ? v : v.toFixed(1)}` : `$${Math.round(v)}`);
+  const col = (d, i) => {
+    const x = L + band * i + (band - bw) / 2;
+    const h = Math.max(0, y(0) - y(d.cost));
+    const r = Math.min(4, h, bw / 2);
+    const tip = `${d.day}: ${usd(d.cost)} · ${d.runs} run${d.runs === 1 ? '' : 's'}`;
+    // rounded data-end, square at the baseline
+    const path = h > 0.5
+      ? `M${x},${y(0)} V${y(d.cost) + r} Q${x},${y(d.cost)} ${x + r},${y(d.cost)} H${x + bw - r} Q${x + bw},${y(d.cost)} ${x + bw},${y(d.cost) + r} V${y(0)} Z`
+      : '';
+    return `<g class="viz-hit" data-tip="${esc(tip)}"><rect x="${L + band * i}" y="${T}" width="${band}" height="${H - T - B}" fill="transparent"/>${path ? `<path d="${path}" class="viz-col"/>` : ''}</g>`;
+  };
+  return `<svg class="viz-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Spend per day, ${daily[0].day} to ${daily[daily.length - 1].day}">
+    ${ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="${v === 0 ? 'viz-base' : 'viz-grid'}"/><text x="${L - 6}" y="${y(v) + 4}" class="viz-tick" text-anchor="end">${fmtTick(v)}</text>`).join('')}
+    ${daily.map(col).join('')}
+    ${daily.map((d, i) => {
+      // every Nth day; the last day too, unless it would sit on top of the label before it
+      const last = i === daily.length - 1;
+      const show = i % labelEvery === 0 || (last && i % labelEvery >= labelEvery / 2);
+      return show ? `<text x="${L + band * i + band / 2}" y="${H - 8}" class="viz-tick" text-anchor="middle">${d.day.slice(5).replace('-', '/')}</text>` : '';
+    }).join('')}
+    ${showLimit ? `<line x1="${L}" x2="${W - R}" y1="${y(limit)}" y2="${y(limit)}" class="viz-ref"/><text x="${W - R}" y="${y(limit) - 5}" class="viz-tick" text-anchor="end">Daily limit ${usd(limit)}</text>` : ''}
+  </svg>`;
+}
+
+/** Ranked horizontal bars, one series: label, bar, value at the tip. */
+function rankBars(items, label = x => x.name) {
+  if (!items.length) return '<div class="empty">No runs in this range.</div>';
+  const max = Math.max(...items.map(i => i.cost)) || 1;
+  return `<div class="viz-rank">${items.slice(0, 8).map(i => `
+    <div class="viz-rank-row viz-hit" data-tip="${esc(`${label(i)}: ${usd(i.cost)} · ${i.runs} run${i.runs === 1 ? '' : 's'}`)}">
+      <span class="viz-rank-label">${esc(label(i))}</span>
+      <span class="viz-rank-track"><span class="viz-rank-bar" style="width:${Math.max(0.5, (i.cost / max) * 100)}%"></span></span>
+      <span class="viz-rank-value">${usd(i.cost)}</span>
+    </div>`).join('')}</div>`;
+}
+
+/** The token mix as one tall segmented bar, shares printed inside when they fit. */
+function tokenBar(t) {
+  const parts = [['Input', t.input, 1], ['Output', t.output, 2], ['Cache read', t.cacheRead, 3], ['Cache write', t.cacheWrite, 4]];
+  const total = parts.reduce((a, p) => a + p[1], 0);
+  if (!total) return '<div class="empty">No token data in this range.</div>';
+  return `<div class="viz-seg" role="img" aria-label="${esc(parts.map(([n, v]) => `${n} ${compact(v)} (${pct(v / total)})`).join(', '))}">
+      ${parts.filter(p => p[1] > 0).map(([n, v, slot]) => `<span class="viz-seg-part s${slot} viz-hit" style="flex-grow:${v}" data-tip="${esc(`${n}: ${compact(v)} tokens (${pct(v / total)})`)}">${v / total >= 0.09 ? pct(v / total) : ''}</span>`).join('')}
+    </div>
+    <ul class="viz-legend">${parts.map(([n, v, slot]) => `<li><i class="sw s${slot}"></i>${n} <b>${compact(v)}</b></li>`).join('')}</ul>`;
+}
+
+async function renderCosts(main) {
+  main.innerHTML = '<div id="costsPage" class="viz-root"><div class="empty">Loading costs…</div></div>';
+  const page = $('#costsPage');
+  const { from, to } = costRange();
+  const q = new URLSearchParams({ from, to, project: costFilters.project, role: costFilters.role, model: costFilters.model });
+  let d;
+  try { d = await api(`/api/analytics?${q}`); } catch (e) { page.innerHTML = `<div class="err-box">${esc(e.message)}</div>`; return; }
+  if (!$('#costsPage')) return; // navigated away meanwhile
+  const o = d.options;
+  const sel = (name, cur, opts, all) => `<select data-cost-filter="${name}" aria-label="${esc(all || name)}">${all ? `<option value="">${esc(all)}</option>` : ''}${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  const roleName = id => (S.roles.find(r => r.id === id) || {}).name || (id === 'stand-up' ? 'Stand-ups' : id);
+  const est = d.estimates;
+  const empty = !d.totals.runs;
+
+  page.innerHTML = `
+    <div class="page-head"><div><h1>Costs</h1><div class="sub">What the crew spent, as Claude Code reports it (API-equivalent cost).${o.hasArchive ? ' Includes archived tasks.' : ''}</div></div></div>
+    <div class="viz-filters">
+      ${sel('range', costFilters.range, [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['month', 'This month'], ['all', 'All time']], '')}
+      ${sel('project', costFilters.project, o.projects.map(p => [p.id, p.name]), 'All projects')}
+      ${sel('role', costFilters.role, o.roles.map(r => [r, roleName(r)]), 'All roles')}
+      ${sel('model', costFilters.model, o.models.map(m => [m, m]), 'All models')}
+      <span class="grow"></span>
+      <a class="btn sm" href="/api/analytics.csv?${q}" download>Export CSV</a>
+    </div>
+    ${empty ? `<div class="card empty-state"><b>No runs in this range yet.</b><p class="hint">Every task and stand-up records its cost, tokens and time. Assign a task and it shows up here.</p></div>` : `
+    <div class="viz-tiles">
+      <div class="card viz-hero"><span class="viz-label">Spend</span><span class="viz-hero-value">${usd(d.totals.cost)}</span><span class="hint">${d.range.from} to ${d.range.to}</span></div>
+      <div class="card viz-tile"><span class="viz-label">Runs</span><span class="viz-value">${d.totals.runs.toLocaleString()}</span><span class="hint">${d.totals.jobs} task(s) and stand-ups</span></div>
+      <div class="card viz-tile"><span class="viz-label">Cost per finished task</span><span class="viz-value">${d.finished.count ? usd(d.finished.costPerTask) : '—'}</span><span class="hint">${d.finished.count} finished</span></div>
+      <div class="card viz-tile"><span class="viz-label">Cache hit rate</span><span class="viz-value">${pct(d.totals.cacheHitRate)}</span><span class="hint">of prompt tokens read from cache</span></div>
+      <div class="card viz-tile"><span class="viz-label">Spent on failed or stopped work</span><span class="viz-value">${usd(d.wasted.cost)}</span><span class="hint">${pct(d.wasted.share)} of spend</span></div>
+      <div class="card viz-tile"><span class="viz-label">Estimates in range</span><span class="viz-value">${est.count ? pct(est.withinRange) : '—'}</span><span class="hint">${est.count ? `${est.count} task(s); actual ${est.medianRatio.toFixed(2)}× the estimate (median)` : 'no estimated tasks yet'}</span></div>
+    </div>
+
+    <section class="card viz-card">
+      <h2>Spend per day</h2>
+      ${dailyChart(d.daily, d.dailyLimit)}
+      <details class="viz-table"><summary>Show as a table</summary>
+        <table><thead><tr><th>Day</th><th>Spend</th><th>Runs</th></tr></thead><tbody>
+        ${d.daily.filter(x => x.runs).map(x => `<tr><td>${x.day}</td><td>${usd(x.cost)}</td><td>${x.runs}</td></tr>`).join('') || '<tr><td colspan="3">No runs</td></tr>'}
+        </tbody></table></details>
+    </section>
+
+    <div class="viz-grid3">
+      <section class="card viz-card"><h2>By project</h2>${rankBars(d.byProject)}</section>
+      <section class="card viz-card"><h2>By role</h2>${rankBars(d.byRole, i => roleName(i.name))}</section>
+      <section class="card viz-card"><h2>By model</h2>${rankBars(d.byModel)}</section>
+    </div>
+
+    <section class="card viz-card"><h2>Tokens <span class="faint">${compact(d.totals.tokens)} in total</span></h2>${tokenBar(d.tokens)}
+      <p class="hint">Cache reads cost a fraction of fresh input; a bigger share of them means cheaper runs.</p></section>
+
+    <div class="viz-grid2">
+      <section class="card viz-card"><h2>Most expensive</h2>
+        <table class="viz-tbl"><thead><tr><th>Task</th><th>Role</th><th class="num">Runs</th><th class="num">Cost</th></tr></thead><tbody>
+        ${d.top.map(j => `<tr ${j.jobKind === 'task' && S.tasks.some(t => t.id === j.jobId) ? `data-task="${j.jobId}" class="clickable"` : ''}><td>${esc(j.title)}${FAILED_STATUS.has(j.status) ? ` <span class="pill red">${esc(j.status)}</span>` : ''}</td><td>${esc(roleName(j.role))}</td><td class="num">${j.runs}</td><td class="num">${usd(j.cost)}</td></tr>`).join('')}
+        </tbody></table></section>
+      <section class="card viz-card"><h2>Estimate vs actual</h2>
+        ${est.count ? `<table class="viz-tbl"><thead><tr><th>Task</th><th class="num">Estimate</th><th class="num">Actual</th><th></th></tr></thead><tbody>
+        ${est.rows.map(e => { const inR = e.actual >= e.low && e.actual <= e.high; return `<tr><td>${esc(e.title)}</td><td class="num">${usd(e.low)}–${usd(e.high)}</td><td class="num">${usd(e.actual)}</td><td>${inR ? '<span class="pill green">✓ in range</span>' : e.actual > e.high ? '<span class="pill amber">▲ over</span>' : '<span class="pill">▼ under</span>'}</td></tr>`; }).join('')}
+        </tbody></table><p class="hint">Each task's first run against the range shown when it was assigned. Estimates learn from these runs.</p>` : '<div class="empty">No estimated tasks in this range yet.</div>'}
+      </section>
+    </div>`}
+    <div id="vizTip" class="viz-tip" role="tooltip" hidden></div>`;
+
+  page.querySelectorAll('[data-cost-filter]').forEach(s => s.addEventListener('change', () => {
+    costFilters[s.dataset.costFilter] = s.value;
+    renderCosts($('#main'));
+  }));
+  // one tooltip for every mark, following the pointer
+  const tip = $('#vizTip');
+  page.addEventListener('pointermove', e => {
+    const h = e.target.closest('.viz-hit');
+    if (!h) { tip.hidden = true; return; }
+    tip.textContent = h.dataset.tip;
+    tip.hidden = false;
+    const r = page.getBoundingClientRect();
+    tip.style.left = `${Math.max(4, Math.min(e.clientX - r.left + 14, r.width - tip.offsetWidth - 8))}px`;
+    tip.style.top = `${e.clientY - r.top + 14}px`;
+  });
+  page.addEventListener('pointerleave', () => { tip.hidden = true; });
 }
 
 /* ---------------- simple 2D office ---------------- */

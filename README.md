@@ -285,6 +285,25 @@ shows today's cost as Claude Code reports it. Sonnet is the default. Pick **Haik
 dialog for quick chores and **Opus** for hard ones. A stand-up is usually a few cents to a few
 tens of cents.
 
+### The Costs page
+
+**Costs** in the sidebar shows what the crew spent, from the cost, tokens and time every task
+and stand-up records (archived tasks included). Pick a range (7, 30 or 90 days, this month, all
+time) and narrow it to a project, role or model:
+
+- **Spend** for the range, runs, cost per finished task, cache hit rate (share of prompt tokens
+  read from cache: higher is cheaper), what was spent on failed or stopped work, and how often
+  the Estimate ETA range was right.
+- **Spend per day** with your daily limit marked; hover a day for its spend and runs, or open the
+  table view.
+- Spend **by project, by role and by model**, and the **token mix** (input, output, cache read,
+  cache write).
+- The **most expensive tasks** (click one to open it) and **estimate vs actual** for recent tasks.
+- **Export CSV**: one row per run (time, project, role, model, cost, turns, seconds, tokens).
+
+Costs are the API-equivalent figures Claude Code reports; on a subscription plan they show
+relative usage rather than an invoice.
+
 ### Estimates and limits
 
 Type the task in the Assign dialog and press **Estimate ETA** for an approximate time and cost

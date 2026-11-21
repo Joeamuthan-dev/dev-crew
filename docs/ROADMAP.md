@@ -223,7 +223,13 @@ pages, animated numbers, and the accessibility pass below.
 - **Accessibility:** full keyboard navigation and visible focus, contrast at WCAG AA, and a 2D
   list view that holds the same information as the 3D office.
 
-## 7. Cost analytics page
+## 7. Cost analytics page — done on `feature/cost-analytics`
+
+Built with `lib/analytics.mjs` (pure, unit tested) over the run data from phase 0, including
+archived tasks. Charts are hand-drawn SVG/HTML (no chart library to vendor), on the validated
+reference palette with selected light and dark values, hover tooltips and a table view. One
+change from the plan: no separate stacked "tokens over time" chart; the token mix is one segmented
+bar for the range, which answers the cache question more directly.
 
 A separate **Costs** page, built from the run data recorded in phase 0.
 
