@@ -157,6 +157,11 @@ your system's "reduce motion" setting turns that off.
 and every page use the whole window; press it again to bring the menu back. The browser remembers
 your choice. On a phone-sized window the same button slides the menu in over the page.
 
+**Look.** The dashboard uses a "liquid glass" style (`public/glass.css`, layered over
+`public/style.css`): frosted, translucent panels over a soft colour wash, the system font, pill
+buttons, segmented controls and floating sheets, in light and dark. Text stays at WCAG AA
+contrast. If your operating system is set to reduce transparency, the panels turn solid.
+
 ## Handoffs and plans
 
 **Handoffs.** When an agent finishes and another role must act for the work to be complete (new
@@ -421,7 +426,7 @@ lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
 lib/git.mjs         worktrees, branch summaries, repo activity
 lib/config.mjs      reads the config and discovers repos
-public/             the dashboard (plain HTML/CSS/JS, no build step)
+public/             the dashboard (plain HTML/CSS/JS, no build step; glass.css is the theme)
 public/office3d.js  the 3D office (three.js, bundled in public/vendor, MIT licence)
 data/               tasks, stand-ups, logs, worktrees (created at runtime)
 ```
