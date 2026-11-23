@@ -19,6 +19,7 @@ import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
 import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH, integratePlan, planWaves } from './lib/handoffs.mjs';
 import { runChecks, qualityAllowRules, suggestQuality, failedChecks } from './lib/quality.mjs';
+import { fixupPrompt, needsFixup, shouldAutoReview, pickBase } from './lib/workflow.mjs';
 import { parseLessons, lessonsFromTask, addLessons, lessonsPromptBlock, lessonKey, rank } from './lib/lessons.mjs';
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
@@ -415,7 +416,12 @@ async function execTask(t, handle) {
       if (!repo) throw new Error(`Repo "${t.repo}" was not found in ${p.path}.`);
       if (t.cleaned) throw new Error('This task\'s worktree was cleaned up. Assign a new task to continue on that branch.');
       if (!t.worktree) {
-        const base = t.base || (await G.currentBranch(repo.path)) || 'HEAD';
+        let base = t.base;
+        if (!base) {
+          const pick = await baseFor(p, repo);
+          base = pick.base;
+          log(t.id, 'sys', `No branch was picked: starting from ${base} (${pick.why}).`);
+        }
         const d = new Date();
         const branch = `agent/${t.role}/${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${slug(t.title)}-${t.id.slice(-4)}`;
         const dir = path.join(WT_DIR, t.projectId, t.id);
@@ -578,6 +584,7 @@ async function execTask(t, handle) {
     else if (res.ok) { t.status = 'done'; takeNextSteps(t, p, res.result); }
     else { t.status = 'failed'; t.error = res.error; log(t.id, 'err', res.error); }
     if (t.status === 'done' || t.status === 'failed') learnFrom({ ...t, refused: (t.refused || []).slice(refusedBefore) }, p, res.result);
+    if (t.status === 'done') afterDone(t, p);
   } catch (e) {
     t.status = handle.cancelled ? 'cancelled' : 'failed';
     t.error = e.message;
@@ -860,6 +867,7 @@ const publicProject = p => ({
   knowledgeGraph: p.knowledgeGraph,
   graphUpdate: p.graphUpdate,
   quality: p.quality,
+  baseBranch: p.baseBranch,
   lessonCount: Object.entries(S.lessons || {}).filter(([k]) => k.startsWith(`${p.id}/`)).reduce((n, [, l]) => n + l.length, 0),
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
@@ -871,6 +879,7 @@ async function stateView() {
       dailyReport: cfg.settings.dailyReport, workspacePath: cfg.settings.workspacePath, configFile: path.basename(cfg.file),
       limits: cfg.settings.limits,
       handoffs: cfg.settings.handoffs,
+      workflow: cfg.settings.workflow,
       ui: cfg.settings.ui,
       desktopAlerts: { ...cfg.settings.desktopAlerts, supported: toastSupported() },
     },
@@ -924,6 +933,52 @@ function followRepo(p, spec, prev) {
   if (pick) return pick;
   if (spec.mode === 'analyze') return '*';
   throw new Error(`No repo for "${spec.title}": name one of ${names.join(', ') || '(none found)'}.`);
+}
+
+/** Where new work starts when no branch was picked (never just whatever is checked out). */
+async function baseFor(p, repo) {
+  const [head, local, current] = await Promise.all([G.originHead(repo.path), G.localBranches(repo.path), G.currentBranch(repo.path)]);
+  return pickBase({ projectBase: p.baseBranch, originHead: head, local, current });
+}
+
+/**
+ * After a change task is done: failed checks send it back to the same agent with the errors
+ * (up to the fix-up rounds in Settings); a good branch goes to the Code Reviewer on its own.
+ */
+function afterDone(t, p) {
+  const wf = cfg.settings.workflow;
+  if (needsFixup(t, wf)) {
+    t.fixups = (t.fixups || 0) + 1;
+    const bad = failedChecks(t.checks);
+    t.pendingFollowup = fixupPrompt(bad, t.fixups, wf.fixRounds);
+    t.status = 'queued';
+    t.queuedAt = Date.now();
+    log(t.id, 'warn', `${bad.map(c => c.label).join(', ')} failed: sent back to the ${roleName(t.role)} with the errors (fix-up ${t.fixups} of ${wf.fixRounds}).`);
+    return;
+  }
+  const reviewer = ROLES.find(r => r.kind === 'review' && (!p.activeRoles || p.activeRoles.includes(r.id)));
+  const verdict = shouldAutoReview(t, wf, {
+    reviewerRole: reviewer ? reviewer.id : '',
+    kindOf: id => (roleById(id) || {}).kind || '',
+    builtOn: S.tasks.some(x => x.prevId === t.id && x.mode === 'change' && x.repo === t.repo && x.status !== 'cancelled'),
+    reviewing: S.tasks.some(x => x.review && x.review.branch === t.branch && (x.status === 'queued' || x.status === 'running')),
+  });
+  if (!verdict.ok) {
+    if (failedChecks(t.checks).length && (t.fixups || 0) >= wf.fixRounds && wf.fixRounds > 0) log(t.id, 'warn', `Checks still fail after ${t.fixups} fix-up round(s): over to you.`);
+    return;
+  }
+  const child = createTaskFromSpec({
+    projectId: t.projectId, role: reviewer.id, mode: 'analyze', repo: t.repo,
+    title: `Review: ${t.title}`.slice(0, 200),
+    details: `Automatic review of the ${roleName(t.role)}'s branch, which passed the project's checks.\n\nTheir task was:\n${t.title}${t.details ? `\n${t.details}` : ''}`.slice(0, 8000),
+    review: { branch: t.branch, base: t.base, prNumber: '' },
+    parentId: t.id, prevId: t.id, dependsOn: [t.id], chainDepth: (t.chainDepth || 0) + 1, origin: 'auto-review',
+  }, { deferPump: true });
+  t.autoReviewId = child.id;
+  t.reviewedCommits = t.git.commits.length;
+  // an agent's own "the reviewer should look at this" handoff is covered by this review
+  for (const h of t.handoffs || []) if (h.role === reviewer.id && h.status === 'proposed') Object.assign(h, { status: 'started', taskId: child.id });
+  log(t.id, 'sys', `Sent to the ${reviewer.name} for review.`);
 }
 
 /** Run the failed checks again on the commit the branch started from; mark those that fail there too. */
@@ -1178,7 +1233,8 @@ async function route(req, res, url) {
     const p = project(url.searchParams.get('project'));
     const repo = p && p.repos.find(r => r.name === url.searchParams.get('repo'));
     if (!repo) return send(res, 404, { error: 'Unknown repo.' });
-    return send(res, 200, { current: await G.currentBranch(repo.path), branches: await G.localBranches(repo.path), remote: await G.remoteBranches(repo.path) });
+    const pick = await baseFor(p, repo);
+    return send(res, 200, { current: await G.currentBranch(repo.path), default: pick.base, defaultWhy: pick.why, branches: await G.localBranches(repo.path), remote: await G.remoteBranches(repo.path) });
   }
 
   if (m === 'POST' && url.pathname === '/api/tasks') return send(res, 200, await createTask(await readBody(req)));
@@ -1567,7 +1623,7 @@ async function route(req, res, url) {
       settings: maskSettings(readRaw().settings || {}),
       effective: {
         model: cfg.settings.model, reportModel: cfg.settings.reportModel, maxConcurrent: cfg.settings.maxConcurrent,
-        limits: cfg.settings.limits, handoffs: cfg.settings.handoffs, dailyReport: cfg.settings.dailyReport,
+        limits: cfg.settings.limits, handoffs: cfg.settings.handoffs, dailyReport: cfg.settings.dailyReport, workflow: cfg.settings.workflow,
         housekeeping: cfg.settings.housekeeping, ui: cfg.settings.ui, claudeCommand: cfg.settings.claudeCommand,
         inheritClaudeEnv: cfg.settings.inheritClaudeEnv, workspacePath: cfg.settings.workspacePath, port: cfg.settings.port,
         workspace: cfg.settings.workspace, permissionMode: cfg.settings.permissionMode || '', permissionModes: PERMISSION_MODES,

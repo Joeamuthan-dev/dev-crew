@@ -227,6 +227,23 @@ the project has them. It also sees the checks Dev Crew ran on the branch. A fail
 a critical or major finding, or a failed check means it can't approve. The checklist shows on the
 review and in the comment posted on the pull request.
 
+**Hands-off workflow** (Settings → General → Workflow). When a change task finishes:
+- **Checks failed?** It goes back to the same agent with the exact errors (the output of each
+  failed check) for a fix-up round, once by default and up to three times. Checks that already
+  failed before the change don't count. If they still fail after the last round, you get a "Checks
+  failed" alert.
+- **Checks pass?** The Code Reviewer reviews the branch automatically, in projects that have one.
+  You get one alert, for the review's result ("Approved" or "Changes requested"), not a separate
+  "ready for review" alert first.
+- A plan step that a later step builds on isn't reviewed on its own; the later branch, which holds
+  its work, is. A branch is reviewed again only after it gets new commits.
+
+**Where new work starts.** When you don't pick a branch, tasks start from the project's **Default
+base branch** (Edit project). If that's blank, they start from the repo's own default branch
+(origin's HEAD, else `main` or `master`). They never start from whatever branch your checkout
+happens to be on. The Assign dialog pre-selects that branch, marks it "(default)", and the task log
+says which one was used.
+
 **Parallel plans.** The Architect may split a feature into steps that don't depend on each other,
 even in the same repo (for example the API and the UI). They run at the same time, each on its own
 branch, up to Settings → Agents at a time. The plan shows which steps run together. When a repo
@@ -524,6 +541,7 @@ lib/integrations.mjs  tools and notifications added in Settings (MCP servers, we
 lib/toast.mjs       Windows notifications from the server, and their one-time action links
 lib/quality.mjs     quality profiles: suggested commands, the review checklist, running the checks
 lib/lessons.mjs     lessons from past runs: collected, ranked and given to the next runs
+lib/workflow.mjs    after a change: fix-up rounds, automatic review, and the default base branch
 scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
