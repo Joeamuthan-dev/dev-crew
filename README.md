@@ -153,6 +153,15 @@ person), Escape closes the task panel and focus returns to where you were. Ctrl+
 should I ask?". Drawers, dialogs, page changes and counters animate briefly; Settings → Motion or
 your system's "reduce motion" setting turns that off.
 
+**Alerts.** When something needs you, Dev Crew says so with what happened and buttons to act on it:
+a branch ready for review (**Review**, **Ask the Code Reviewer**), a plan ready (**Start plan**), a
+suggested handoff (**Start handoff**), a task that failed, stopped at a limit or made no changes, and
+refused commands. While you are looking at Dev Crew they appear at the top right; while it is in the
+background they can come as system notifications, whose buttons work without opening the page.
+Turn them on and pick the events in Settings → General → Alerts (saved per browser; keep a Dev
+Crew tab open, minimised is fine). Embedded browsers may not allow system notifications; Chrome and
+Edge do.
+
 **Full-width view.** The ☰ button at the top left (or Ctrl+B) hides the side menu, so the office
 and every page use the whole window; press it again to bring the menu back. The browser remembers
 your choice. On a phone-sized window the same button slides the menu in over the page.
