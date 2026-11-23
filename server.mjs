@@ -1,6 +1,7 @@
 // Dev Crew server: a queue of agent runs, a daily stand-up scheduler, a small JSON API and
 // a live event stream for the dashboard. Listens on 127.0.0.1 only: these agents edit code.
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig, refreshRepos } from './lib/config.mjs';
@@ -21,7 +22,7 @@ import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.m
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
 import { detectProject, findRepos } from './lib/detect.mjs';
 import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
-import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules } from './lib/graph.mjs';
+import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -272,6 +273,86 @@ function graphContext(p, repo, t, tmpDir) {
   if (out.block) log(t.id, 'sys', `Using the knowledge graph of ${where.name} (${mode === 'tools' ? 'graph tools' : 'digest in the prompt'})`);
   return out;
 }
+
+/* ---------------- the knowledge graph: view, status and updates ---------------- */
+
+// One graphify update at a time (it is CPU-heavy); state per project repo for the Graph tab.
+const graphJobs = new Map(); // "projectId:repo" -> { running, startedAt, endedAt, ok, error, why, output }
+let graphChain = Promise.resolve();
+
+/** Re-extract a repo's graph with `graphify update` (code only, no LLM, so no cost). */
+function runGraphUpdate(p, repo, why = 'manual') {
+  const key = `${p.id}:${repo.name}`;
+  const cur = graphJobs.get(key);
+  if (cur && (cur.running || cur.queued)) return cur;
+  const job = { queued: true, running: false, why, output: '' };
+  graphJobs.set(key, job);
+  emit('graph', { projectId: p.id, repo: repo.name, ...job });
+  graphChain = graphChain.then(() => new Promise(resolve => {
+    Object.assign(job, { queued: false, running: true, startedAt: Date.now() });
+    emit('graph', { projectId: p.id, repo: repo.name, ...job });
+    let child;
+    try {
+      child = spawn(graphifyCommand(), ['update', repo.path], { cwd: repo.path, windowsHide: true, env: process.env });
+    } catch (e) {
+      Object.assign(job, { running: false, ok: false, error: e.message, endedAt: Date.now() });
+      emit('graph', { projectId: p.id, repo: repo.name, ...job });
+      return resolve();
+    }
+    const keep = d => { job.output = (job.output + d).slice(-4000); };
+    child.stdout.on('data', keep);
+    child.stderr.on('data', keep);
+    const done = (code, err) => {
+      const ok = !err && code === 0;
+      // graphify skips the rebuild when no tracked code file changed: say so, and remember the check
+      job.unchanged = ok && /none of the .* files differ|skipping rebuild/i.test(job.output);
+      Object.assign(job, { running: false, ok, endedAt: Date.now(), error: ok ? '' : (err ? err.message : (job.output.trim().split('\n').slice(-3).join(' ') || `graphify exited with code ${code}`)).slice(0, 400) });
+      console.log(`graph ${ok ? 'updated' : 'update failed'}: ${p.name}/${repo.name} (${why}, ${Math.round((job.endedAt - job.startedAt) / 1000)}s)`);
+      emit('graph', { projectId: p.id, repo: repo.name, ...job });
+      resolve();
+    };
+    child.on('error', e => done(-1, /ENOENT/.test(e.message) ? new Error('graphify was not found. Install it with: uv tool install graphifyy') : e));
+    child.on('close', code => done(code));
+  }));
+  return job;
+}
+
+/** What the Graph tab shows for each repo of a project. */
+async function graphInfo(p) {
+  refreshRepos(p);
+  const out = [];
+  for (const repo of p.repos) {
+    const g = findGraph(repo.path);
+    const job = graphJobs.get(`${p.id}:${repo.name}`) || null;
+    const row = { repo: repo.name, exists: !!(g && g.graph), builtAt: g ? g.builtAt : 0, hasView: !!(g && fs.existsSync(path.join(g.dir, 'graph.html'))), job };
+    if (g && g.report) Object.assign(row, graphStats(fs.readFileSync(g.report, 'utf8')));
+    if (g && g.builtAt) {
+      const since = new Date(g.builtAt).toISOString();
+      row.commitsSince = Number(await G.git(repo.path, ['rev-list', '--count', `--since=${since}`, 'HEAD'], { allowFail: true })) || 0;
+      row.branch = await G.currentBranch(repo.path);
+    }
+    out.push(row);
+  }
+  return { mode: p.graphUpdate || 'off', modes: GRAPH_UPDATE_MODES, repos: out };
+}
+
+// Automatic updates: every half hour, for projects that asked for them.
+async function checkGraphUpdates() {
+  for (const p of cfg.projects) {
+    if (!p.graphUpdate || p.graphUpdate === 'off') continue;
+    refreshRepos(p);
+    for (const repo of p.repos) {
+      const g = findGraph(repo.path);
+      if (!g || !g.graph) continue;
+      const last = Number(await G.git(repo.path, ['log', '-1', '--format=%ct'], { allowFail: true })) * 1000 || 0;
+      const prev = graphJobs.get(`${p.id}:${repo.name}`);
+      const checkedAt = prev && prev.ok ? prev.endedAt || 0 : 0;
+      if (graphUpdateDue(p.graphUpdate, { builtAt: g.builtAt, lastCommitAt: last, checkedAt })) runGraphUpdate(p, repo, p.graphUpdate === 'weekly' ? 'weekly' : 'new commits');
+    }
+  }
+}
+setInterval(() => checkGraphUpdates().catch(e => console.warn('graph check:', e.message)), 30 * 60000);
+setTimeout(() => checkGraphUpdates().catch(() => {}), 20000);
 
 function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'task';
@@ -636,6 +717,7 @@ const publicProject = p => ({
   activeRoles: p.activeRoles,
   allowCommands: p.allowCommands,
   knowledgeGraph: p.knowledgeGraph,
+  graphUpdate: p.graphUpdate,
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
 
@@ -1130,6 +1212,40 @@ async function route(req, res, url) {
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true, id: proj.id });
+  }
+
+  // The Graph tab: GET /api/projects/:id/graph (status), GET …/graph/:repo/view (graphify's
+  // interactive page), POST …/graph/:repo/update (refresh it now), POST …/graph-update {mode}.
+  if (parts[1] === 'projects' && parts[2] && (parts[3] === 'graph' || parts[3] === 'graph-update')) {
+    const p = project(parts[2]);
+    if (!p) return send(res, 404, { error: 'Unknown project.' });
+    if (m === 'GET' && parts[3] === 'graph' && !parts[4]) return send(res, 200, await graphInfo(p));
+    if (m === 'POST' && parts[3] === 'graph-update') {
+      const { mode } = await readBody(req);
+      if (!GRAPH_UPDATE_MODES.includes(mode)) return send(res, 400, { error: 'Unknown update setting.' });
+      const raw = readRaw();
+      const rawP = (raw.projects || []).find(x => x.id === p.id);
+      if (!rawP) return send(res, 404, { error: 'This project is not in crew.config.local.json.' });
+      if (mode === 'off') delete rawP.graphUpdate; else rawP.graphUpdate = mode;
+      writeRaw(raw);
+      cfg = loadConfig();
+      emit('reload', {});
+      if (mode !== 'off') checkGraphUpdates().catch(() => {});
+      return send(res, 200, { ok: true, mode });
+    }
+    const repo = parts[4] && p.repos.find(r => r.name === decodeURIComponent(parts[4]));
+    if (!repo) return send(res, 404, { error: 'Unknown repo.' });
+    const g = findGraph(repo.path);
+    if (m === 'GET' && parts[5] === 'view') {
+      const file = g && path.join(g.dir, 'graph.html');
+      if (!file || !fs.existsSync(file)) return send(res, 404, { error: 'This repo has no graph view yet.' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return fs.createReadStream(file).pipe(res);
+    }
+    if (m === 'POST' && parts[5] === 'update') {
+      if (!g || !g.graph) return send(res, 400, { error: 'This repo has no graph yet. Build the first one with /graphify in Claude Code; after that Dev Crew can keep it up to date.' });
+      return send(res, 200, runGraphUpdate(p, repo, 'manual'));
+    }
   }
 
   // POST /api/projects/:id/allow {rule}: add a command an agent was refused to the project's

@@ -112,3 +112,17 @@ test('summarizeTrial and compareToBaseline compare medians with no graph', () =>
   assert.match(md, /\*\*tools:\*\* cost -40%, prompt tokens -50%/);
   assert.match(md, /failed: x/);
 });
+
+test('graph updates: status numbers, and when an automatic update is due', async () => {
+  const { graphStats, graphUpdateDue, cleanGraphUpdate } = await import('../lib/graph.mjs');
+  assert.deepEqual(graphStats('- 276 files · ~70,829 words\n- 2714 nodes · 6,180 edges · 113 communities'), { nodes: 2714, edges: 6180, communities: 113, files: 276 });
+  const day = 864e5;
+  assert.equal(graphUpdateDue('commits', { builtAt: 1000, lastCommitAt: 5000 }), true);
+  assert.equal(graphUpdateDue('commits', { builtAt: 5000, lastCommitAt: 4000 }), false);
+  assert.equal(graphUpdateDue('commits', { builtAt: 1000, lastCommitAt: 5000, checkedAt: 6000 }), false); // checked, nothing to rebuild
+  assert.equal(graphUpdateDue('weekly', { builtAt: 0 + day, now: 9 * day }), true);
+  assert.equal(graphUpdateDue('weekly', { builtAt: 5 * day, now: 9 * day }), false);
+  assert.equal(graphUpdateDue('off', { builtAt: 1, lastCommitAt: 9e12 }), false);
+  assert.equal(graphUpdateDue('commits', { builtAt: 0, lastCommitAt: 9e12 }), false); // no first graph: never here
+  assert.equal(cleanGraphUpdate('hourly'), 'off');
+});

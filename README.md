@@ -348,7 +348,14 @@ project → Knowledge graph** (or `"knowledgeGraph"` in the config). It is off b
   needs graphify's MCP extra: `uv tool install "graphifyy[mcp]"`. The PR tools graphify also
   offers stay off.
 
-The graph is a snapshot: re-run `graphify update <repo>` (no LLM needed) after big changes.
+**The Graph tab.** Each project page has a **Graph** tab with graphify's interactive map of the
+repo (search a class or file, click a node to see what it connects to, filter by area), how fresh
+it is (when it was built and how many commits have landed on the checked-out branch since), and
+**Update graph**, which re-reads the code with `graphify update` (no AI, no cost) and refreshes the
+view. **Keep it current** chooses how it updates by itself: only when you press Update, after new
+commits (checked every half hour), or once a week. The first graph of a repo is built with
+`/graphify` in Claude Code; after that Dev Crew keeps it up to date. graphify must be installed
+where Dev Crew runs (`uv tool install "graphifyy[mcp]" --python 3.12`).
 
 **Measure it before you keep it on.** `npm run graph-trial -- --project <id>` runs the same three
 read-only questions on a repo with no graph, with the digest and with the graph tools, and writes

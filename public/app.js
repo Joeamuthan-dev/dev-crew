@@ -95,6 +95,13 @@ function connect() {
     if (drawer) refreshDrawer();
   });
   es.addEventListener('reload', () => load());
+  // a graph update started or finished: refresh the Graph tab's status, and its view when done
+  es.addEventListener('graph', e => {
+    const g = JSON.parse(e.data);
+    const page = $('#graphPage');
+    if (!page || page.dataset.pid !== g.projectId) return;
+    loadGraph(g.projectId, { reloadView: !g.running && !g.queued && g.ok && g.repo === graphUi.repo });
+  });
   es.addEventListener('monday', () => load());
 }
 
@@ -385,6 +392,11 @@ function render() {
   // Drawn on arrival and when a filter changes, not on every live update (hover state stays put).
   if (r.view === 'costs') { if (!$('#costsPage')) renderCosts(main); return; }
   const scroll = window.scrollY;
+  if (r.view === 'project' && projOf(r.id) && r.tab === 'graph') {
+    const page = $('#graphPage');
+    if (!page || page.dataset.pid !== r.id) { main.innerHTML = projectView(projOf(r.id), 'graph'); loadGraph(r.id); }
+    return;
+  }
   if (r.view === 'project' && projOf(r.id)) main.innerHTML = projectView(projOf(r.id), r.tab);
   else if (r.view === 'office') main.innerHTML = office2dView();
   else main.innerHTML = todayView();
@@ -825,9 +837,61 @@ function taskRow(t, showProject) {
 
 /* ---------------- Project ---------------- */
 
+/* The Graph tab: graphify's interactive map of a repo, how fresh it is, and keeping it current. */
+const graphUi = { repo: '', info: null };
+
+function graphTab(p) {
+  return `<div id="graphPage" data-pid="${esc(p.id)}">
+    <div class="card graph-bar" id="graphBar"><span class="faint">Loading the graph…</span></div>
+    <div class="graph-frame" id="graphFrame"></div>
+  </div>`;
+}
+
+async function loadGraph(pid, { reloadView = false } = {}) {
+  let info;
+  try { info = await api(`/api/projects/${encodeURIComponent(pid)}/graph`); } catch (e) { $('#graphBar').innerHTML = `<span class="err-inline">${esc(e.message)}</span>`; return; }
+  const page = $('#graphPage');
+  if (!page || page.dataset.pid !== pid) return;
+  graphUi.info = info;
+  const withGraph = info.repos.filter(r => r.exists);
+  if (!graphUi.repo || !info.repos.some(r => r.repo === graphUi.repo)) graphUi.repo = (withGraph[0] || info.repos[0] || {}).repo || '';
+  const r = info.repos.find(x => x.repo === graphUi.repo);
+  const bar = $('#graphBar');
+  if (!r) { bar.innerHTML = '<span class="faint">This project has no git repos.</span>'; $('#graphFrame').innerHTML = ''; return; }
+  const job = r.job;
+  const busy = job && (job.running || job.queued);
+  const fmt = n => (n || 0).toLocaleString();
+  const when = r.builtAt ? `${fmtTime(r.builtAt)} (${ago(r.builtAt)})` : '';
+  const pick = info.repos.length > 1
+    ? `<select id="graphRepo" aria-label="Repo">${info.repos.map(x => `<option value="${esc(x.repo)}" ${x.repo === r.repo ? 'selected' : ''}>${esc(x.repo)}${x.exists ? '' : ' (no graph)'}</option>`).join('')}</select>`
+    : `<b>${esc(r.repo)}</b>`;
+  const status = !r.exists
+    ? 'No graph yet. Build the first one with <code>/graphify</code> in Claude Code for this repo; after that Dev Crew keeps it current.'
+    : `${fmt(r.nodes)} nodes · ${fmt(r.edges)} links · ${fmt(r.communities)} areas · built ${esc(when)}${r.commitsSince ? ` · <b class="warn">${r.commitsSince} commit${r.commitsSince === 1 ? '' : 's'} on ${esc(r.branch || 'the branch')} since</b>` : ' · <span class="ok-text">up to date with the latest commit</span>'}`;
+  const jobLine = busy ? `<span class="graph-job">${job.queued ? 'Waiting to update…' : 'Updating the graph…'}</span>`
+    : job && job.ok === false ? `<span class="err-inline" title="${esc(job.output || '')}">Update failed: ${esc(job.error || '')}</span>`
+      : job && job.ok && job.unchanged ? `<span class="ok-text">Checked ${ago(job.endedAt)}: no code changes since the last build</span>`
+      : job && job.ok ? `<span class="ok-text">Updated ${ago(job.endedAt)}${job.why && job.why !== 'manual' ? ` (${esc(job.why)})` : ''}</span>` : '';
+  bar.innerHTML = `<div class="graph-top">${pick}<span class="grow"></span>
+      ${r.exists ? `<label class="graph-auto">Keep it current <select id="graphMode">${[['off', 'Only when I press Update'], ['commits', 'After new commits'], ['weekly', 'Once a week']].map(([v, l]) => `<option value="${v}" ${info.mode === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
+      ${r.hasView ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="/api/projects/${encodeURIComponent(pid)}/graph/${encodeURIComponent(r.repo)}/view">Open full screen</a>` : ''}
+      ${r.exists ? `<button class="btn sm primary" id="graphUpdate" ${busy ? 'disabled' : ''}>${busy ? 'Updating…' : 'Update graph'}</button>` : ''}
+    </div>
+    <div class="graph-status">${status} ${jobLine}</div>
+    <p class="hint">Updating reads the code again (no AI, no cost). Click a node to see what it connects to; search finds a class or file. The crew can use this graph when the project's Knowledge graph setting is on (Edit project).</p>`;
+  const frame = $('#graphFrame');
+  const src = r.hasView ? `/api/projects/${encodeURIComponent(pid)}/graph/${encodeURIComponent(r.repo)}/view` : '';
+  const cur = frame.querySelector('iframe');
+  if (!src) frame.innerHTML = r.exists ? '<div class="empty">This graph has no viewer page (graph.html). Update it to create one.</div>' : '';
+  else if (!cur || cur.dataset.src !== src) frame.innerHTML = `<iframe title="Knowledge graph of ${esc(r.repo)}" data-src="${src}" src="${src}" loading="lazy"></iframe>`;
+  else if (reloadView) cur.src = `${src}?t=${Date.now()}`;
+}
+
+
+
 function projectView(p, tab) {
-  const tabs = [['crew', 'Crew'], ['tasks', 'Tasks'], ['standups', 'Stand-ups']];
-  const body = tab === 'tasks' ? tasksTab(p) : tab === 'standups' ? standupsTab(p) : crewTab(p);
+  const tabs = [['crew', 'Crew'], ['tasks', 'Tasks'], ['standups', 'Stand-ups'], ['graph', 'Graph']];
+  const body = tab === 'tasks' ? tasksTab(p) : tab === 'standups' ? standupsTab(p) : tab === 'graph' ? graphTab(p) : crewTab(p);
   return `
     <div class="page-head">
       <div>
@@ -2088,6 +2152,14 @@ document.addEventListener('click', async e => {
     if (t && rev) openAssign({ projectId: t.projectId, role: rev.id, repo: t.repo, reviewBranch: t.branch, reviewBase: t.base });
     return;
   }
+  if (e.target.id === 'graphUpdate') {
+    const pid = $('#graphPage').dataset.pid;
+    e.target.disabled = true;
+    try { await api(`/api/projects/${encodeURIComponent(pid)}/graph/${encodeURIComponent(graphUi.repo)}/update`, { method: 'POST' }); toast('Updating the graph'); }
+    catch (err) { toast(err.message, true); }
+    loadGraph(pid);
+    return;
+  }
   const um = e.target.closest('[data-unclamp]');
   if (um) {
     const box = um.previousElementSibling;
@@ -2207,6 +2279,15 @@ $('#peopleQ').addEventListener('keydown', e => {
 $('#peopleQ').addEventListener('focus', () => { if (lastSearch && $('#peopleQ').value) $('#peoplePop').hidden = false; });
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#peopleQ').focus(); $('#peopleQ').select(); }
+});
+document.addEventListener('change', async e => {
+  const page = $('#graphPage');
+  if (!page) return;
+  if (e.target.id === 'graphRepo') { graphUi.repo = e.target.value; loadGraph(page.dataset.pid); }
+  if (e.target.id === 'graphMode') {
+    try { await api(`/api/projects/${encodeURIComponent(page.dataset.pid)}/graph-update`, { method: 'POST', body: { mode: e.target.value } }); toast(e.target.value === 'off' ? 'The graph updates only when you press Update' : e.target.value === 'commits' ? 'The graph updates after new commits' : 'The graph updates once a week'); }
+    catch (err) { toast(err.message, true); }
+  }
 });
 document.addEventListener('keydown', e => {
   const t = e.target;
