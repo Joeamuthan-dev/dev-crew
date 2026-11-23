@@ -590,8 +590,10 @@ function agentCardHtml(pid, role) {
   const current = mine.find(t => t.status === 'running') || mine.find(t => t.status === 'failed' || needsReview(t));
   const rows = items.map(i => {
     const t = taskForTicket(pid, i.id);
-    let act = `<button class="btn sm" data-ticket-work="${esc(i.id)}">Work on it</button>`;
+    // sample tickets (no monday.com) are not real work in the repo: nothing to assign
+    let act = b && b.demo ? '<span class="tk-sample" title="A made-up ticket: monday.com is not connected">Sample</span>' : `<button class="btn sm" data-ticket-work="${esc(i.id)}">Work on it</button>`;
     if (t && (t.status === 'running' || t.status === 'queued')) act = `<button class="btn sm ghost" data-task="${t.id}">${t.status === 'running' ? 'Working' : 'Queued'}</button>`;
+    else if (t && t.status === 'done' && t.noChanges) act = `<button class="btn sm ghost warn-btn" data-task="${t.id}" title="The agent finished without changing anything: open it to see why">No changes · see why</button>`;
     else if (t && t.status === 'done' && !t.ticket.postedAt) act = `<button class="btn sm" data-ticket-post="${t.id}" title="Post the agent's report as an update on the ticket">Post report</button>`;
     else if (t) act = `<button class="btn sm ghost" data-task="${t.id}">View task</button>`;
     return `<li><div class="tk-main">${ticketPill(i.status)}<span class="tk-name" title="${esc(i.name)}">${i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.name)}</a>` : esc(i.name)}</span></div>
@@ -601,6 +603,7 @@ function agentCardHtml(pid, role) {
     <header><span class="avatar sm">${esc(r.short)}</span><div class="ac-who"><b>${esc(r.name)}</b><span>${esc(p ? p.name : pid)}</span></div><button class="icon-btn" data-card-close aria-label="Close">✕</button></header>
     <p class="say">${esc(agentSays(pid, role))}</p>
     <section><h4>On the board${b && b.demo ? ' <span class="demo-tag" title="Connect monday.com in the config to see your real board">demo</span>' : ''}</h4>
+      ${b && b.demo && items.length ? '<p class="demo-note">These are <b>sample tickets</b> to show how the board looks. They are not work in your repo, so they cannot be assigned. Use <b>Assign a task</b> below, or connect monday.com in Settings → Integrations.</p>' : ''}
       ${items.length ? `<ul class="tickets">${rows}</ul>` : '<p class="muted">No tickets for this role.</p>'}
       ${b && b.error ? `<p class="err-line">${esc(b.error)}</p>` : ''}</section>
     ${contacts.length ? `<section><h4>Ask a person</h4><div class="contacts">${contacts.map(n => {
