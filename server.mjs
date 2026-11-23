@@ -9,7 +9,7 @@ import { parseReview, reviewMarkdown, postReview } from './lib/review.mjs';
 import * as G from './lib/git.mjs';
 import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
 import { settingsFromForm, maskSettings } from './lib/settings.mjs';
-import { collectRuns, summarize, runsCsv, filterRows, dayKey } from './lib/analytics.mjs';
+import { collectRuns, summarize, runsCsv, filterRows, dayKey, trialJobs } from './lib/analytics.mjs';
 import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseReport, summaryOf } from './lib/prompts.mjs';
 import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
@@ -20,6 +20,7 @@ import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHA
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
 import { detectProject, findRepos } from './lib/detect.mjs';
+import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
 import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules } from './lib/graph.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
@@ -40,7 +41,25 @@ setInterval(() => refreshMonday().catch(e => console.warn(e.message)), 120000);
 const S = store.state;
 
 for (const t of S.tasks) {
+  // tasks from before "No changes" existed: a finished change task with no commits made nothing
+  if (t.status === 'done' && t.mode === 'change' && t.git && !t.git.commits.length && !t.git.uncommitted && !t.mergeTarget) t.noChanges = true;
   if (t.status === 'running') { t.status = 'failed'; t.error = 'Interrupted: the server stopped during this run. Send a follow-up to continue it.'; }
+}
+// Tasks from before refused commands were kept on the task: read them back from the log once.
+for (const t of S.tasks.slice(0, 60)) {
+  if (t.refused) continue;
+  try {
+    const fresh = [];
+    for (const l of store.readLog(t.id)) {
+      const m = l.kind === 'warn' && /^Blocked by the crew's permissions: (.*)$/s.exec(l.text || '');
+      if (!m) continue;
+      for (const part of m[1].split(' · ')) {
+        const i = part.indexOf(': ');
+        if (i > 0) fresh.push({ tool: part.slice(0, i), command: part.slice(i + 2).trim() });
+      }
+    }
+    if (fresh.length) t.refused = mergeRefused([], refusedCommands(fresh.map(f => ({ tool_name: f.tool, tool_input: { command: f.command } }))));
+  } catch { /* no log */ }
 }
 for (const r of S.reports) {
   if (r.status === 'running' || r.status === 'queued') { r.status = 'failed'; r.error = 'Interrupted: the server stopped before this report finished.'; }
@@ -339,7 +358,8 @@ async function execTask(t, handle) {
         graph: graphCtx.block,
         cwd, branch: t.branch, base: t.base, readFrom,
         prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
-        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) ? 'off' : policyFor(p),
+        // a plan step's next steps are the plan's own, so it proposes no handoffs of its own
+        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) || t.origin === 'plan' ? 'off' : policyFor(p),
         plan: !!t.planTask,
         review: t.review, mergeTarget: t.mergeTarget,
       }),
@@ -375,6 +395,9 @@ async function execTask(t, handle) {
     if (res.denials.length) {
       const what = res.denials.map(d => d.tool_name + (d.tool_input && d.tool_input.command ? `: ${d.tool_input.command}` : '')).join(' · ');
       log(t.id, 'warn', `Blocked by the crew's permissions: ${what}`.slice(0, 800));
+      // kept on the task, so the panel can show them and offer to allow them for the project
+      const fresh = refusedCommands(res.denials);
+      if (fresh.length) t.refused = mergeRefused(t.refused, fresh);
     }
     if (res.result) {
       t.result = res.result;
@@ -382,6 +405,10 @@ async function execTask(t, handle) {
       (t.history = t.history || []).push({ at: Date.now(), prompt: followup || t.title, result: res.result });
     }
     if (t.mode === 'change' && t.baseSha) t.git = await G.branchSummary(repo.path, t.baseSha, t.branch, t.worktree);
+    // A change task with no commits and nothing uncommitted made nothing: say so, never 'done' alone.
+    if (t.mode === 'change' && t.git && res.ok && !handle.cancelled && !handle.limitHit) {
+      if (!t.git.commits.length && !t.git.uncommitted && !t.mergeTarget) t.noChanges = true; else delete t.noChanges;
+    }
     if (kind === 'review' && t.review && res.result) {
       const found = parseReview(res.result);
       if (found) t.review = { ...t.review, result: found, posted: null };
@@ -607,6 +634,7 @@ const publicProject = p => ({
   repos: p.repos.map(r => ({ name: r.name, path: r.path, exists: r.exists })), roles: p.roles,
   handoffs: policyFor(p),
   activeRoles: p.activeRoles,
+  allowCommands: p.allowCommands,
   knowledgeGraph: p.knowledgeGraph,
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
@@ -660,6 +688,11 @@ const policyFor = p => handoffPolicy(cfg.settings.handoffs, p && p.handoffs);
  */
 function followRepo(p, spec, prev) {
   const names = p.repos.map(r => r.name);
+  // A repo that is named but not in the project is an error, never a silent switch to another
+  // repo: a frontend change "in" the API repo only wastes a run.
+  if (spec.repo && spec.repo !== '*' && !names.includes(spec.repo)) {
+    throw new Error(`"${spec.title}" is for the ${spec.repo} repo, which is not in ${p.name} (${names.join(', ') || 'no repos'}). Clone it into the project folder, or assign the work yourself.`);
+  }
   const pick = [spec.repo, prev && prev.repo !== '*' ? prev.repo : '', (p.roles[spec.role] || {}).repo, names.length === 1 ? names[0] : '']
     .find(n => n && names.includes(n));
   if (pick) return pick;
@@ -687,7 +720,17 @@ function startPlan(planTask) {
   const plan = planTask.plan;
   const idByKey = {};
   const made = [];
+  const ids = [];
+  const names = p.repos.map(r => r.name);
+  const skipped = [];
   for (const s of plan.steps) {
+    // Steps for a repo the project does not have are shown in the plan but never started.
+    if (s.missingRepo || (s.repo && s.repo !== '*' && !names.includes(s.repo))) {
+      s.missingRepo = true;
+      skipped.push(s.title);
+      ids.push(null);
+      continue;
+    }
     const deps = s.dependsOn.map(k => idByKey[k]).filter(Boolean);
     const depTasks = deps.map(taskById);
     // Build on the latest dependency that changes the same repo; else read the latest one.
@@ -700,9 +743,12 @@ function startPlan(planTask) {
     }, { deferPump: true });
     idByKey[s.key] = child.id;
     made.push(child);
+    ids.push(child.id);
   }
-  Object.assign(plan, { status: 'started', taskIds: made.map(t => t.id) });
+  if (!made.length) throw new Error('Every step of this plan is for a repo that is not in the project, so nothing was started.');
+  Object.assign(plan, { status: 'started', taskIds: ids });
   log(planTask.id, 'sys', `Plan started: ${made.length} linked task(s).`);
+  if (skipped.length) log(planTask.id, 'warn', `Not started, because their repo is not in ${p.name}: ${skipped.map(x => `"${x}"`).join(', ')}.`);
   pump();
   return made;
 }
@@ -712,7 +758,7 @@ function takeNextSteps(t, p, result) {
   const policy = policyFor(p);
   const roleIds = (p && p.activeRoles && p.activeRoles.length) ? p.activeRoles : ROLES.map(r => r.id);
   if (t.planTask) {
-    const steps = parsePlan(result, { roleIds });
+    const steps = parsePlan(result, { roleIds, repoNames: p ? p.repos.map(r => r.name) : null });
     if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
     t.plan = { steps, status: 'proposed' };
     if (policy === 'auto') {
@@ -720,7 +766,7 @@ function takeNextSteps(t, p, result) {
     }
     return;
   }
-  if (policy === 'off') return;
+  if (policy === 'off' || t.origin === 'plan') return;
   const found = parseHandoffs(result, { fromRole: t.role, roleIds });
   const have = new Set((t.handoffs || []).map(h => `${h.role}:${h.title.toLowerCase()}`));
   for (const h of found) {
@@ -1086,6 +1132,24 @@ async function route(req, res, url) {
     return send(res, 200, { ok: true, id: proj.id });
   }
 
+  // POST /api/projects/:id/allow {rule}: add a command an agent was refused to the project's
+  // allowed commands (change tasks only; the always-refused list still wins).
+  if (m === 'POST' && parts[1] === 'projects' && parts[2] && parts[3] === 'allow') {
+    const { rule } = await readBody(req);
+    const r = String(rule || '').trim().replace(/\s+/g, ' ');
+    const problem = ruleProblem(r);
+    if (problem) return send(res, 400, { error: problem });
+    const raw = readRaw();
+    const rawP = (raw.projects || []).find(p => p.id === parts[2]);
+    if (!rawP) return send(res, 404, { error: 'This project is not in crew.config.local.json.' });
+    const list = Array.isArray(rawP.allowCommands) ? rawP.allowCommands : [];
+    if (!list.includes(r)) rawP.allowCommands = [...list, r];
+    writeRaw(raw);
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, allowCommands: rawP.allowCommands });
+  }
+
   if (m === 'DELETE' && parts[1] === 'projects' && parts[2] && !parts[3]) {
     if (S.tasks.some(t => t.projectId === parts[2] && ['queued', 'running', 'blocked'].includes(t.status))) {
       return send(res, 409, { error: 'Finish or cancel this project\'s active tasks first.' });
@@ -1102,7 +1166,16 @@ async function route(req, res, url) {
     const day = s => (/^\d{4}-\d{2}-\d{2}$/.test(s || '') ? s : undefined);
     const filters = { from: day(q.get('from')), to: day(q.get('to')), projectId: q.get('project') || undefined, role: q.get('role') || undefined, model: q.get('model') || undefined };
     const archived = readArchive();
-    const tasks = [...S.tasks, ...archived.tasks];
+    // knowledge-graph trial runs are real spend too
+    const trials = [];
+    try {
+      const dir = path.join(DATA, 'graph-trial');
+      for (const f of fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => n.endsWith('.json')) : []) {
+        try { trials.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))); } catch { /* a half-written file */ }
+      }
+    } catch { /* no trials */ }
+    const idOf = name => (cfg.projects.find(p => p.name === name || p.id === name) || {}).id || name;
+    const tasks = [...S.tasks, ...archived.tasks, ...trialJobs(trials, idOf)];
     const rows = collectRuns({ tasks, reports: [...S.reports, ...archived.reports] });
     const projectName = id => (project(id) || {}).name || id;
     if (url.pathname.endsWith('.csv')) {
@@ -1119,7 +1192,7 @@ async function route(req, res, url) {
       ...summary,
       options: {
         projects: cfg.projects.map(p => ({ id: p.id, name: p.name })),
-        roles: [...new Set([...ROLES.map(r => r.id), 'stand-up'])],
+        roles: [...new Set([...ROLES.map(r => r.id), 'stand-up', ...(trials.length ? ['graph-trial'] : [])])],
         models: [...new Set(rows.map(r => r.model))].sort(),
         firstDay: rows.length ? rows[0].day : dayKey(Date.now()),
         hasArchive: archived.tasks.length + archived.reports.length > 0,

@@ -171,7 +171,8 @@ function statusPill(t) {
   if (t.status === 'stopped') return `<span class="pill amber" title="${esc(t.error || '')}">Stopped · ${t.stopReason === 'budget' ? 'cost limit' : 'time limit'}</span>`;
   if (t.status === 'blocked') return `<span class="pill red" title="${esc(t.error || '')}">Blocked</span>`;
   if (t.status === 'queued' && waitingOn(t).length) return `<span class="pill" title="Starts when the tasks it depends on are done">Waiting</span>`;
-  if (t.status === 'done' && (t.handoffs || []).some(h => h.status === 'proposed')) return '<span class="pill amber">Handoff</span>';
+  if (t.status === 'done' && t.noChanges) return '<span class="pill amber" title="Finished without a single commit">No changes</span>';
+  if (t.status === 'done' && t.origin !== 'plan' && (t.handoffs || []).some(h => h.status === 'proposed')) return '<span class="pill amber">Handoff</span>';
   if (t.status === 'done' && t.plan && t.plan.status === 'proposed') return '<span class="pill amber">Plan ready</span>';
   if (t.status === 'cancelled') return '<span class="pill">Cancelled</span>';
   if (needsReview(t)) return '<span class="pill amber">Review</span>';
@@ -181,7 +182,46 @@ function statusPill(t) {
 function healthPill(r) {
   if (!r) return '<span class="pill">No stand-up yet</span>';
   const label = { green: 'On track', amber: 'Watch', red: 'At risk' }[r.health] || 'Reported';
-  return `<span class="pill ${r.health}">${label}</span>`;
+  const days = standupAgeDays(r);
+  // an old stand-up is shown as such, so "At risk" from two days ago doesn't read as today's news
+  return days > 0
+    ? `<span class="pill ${r.health} stale" title="From the ${esc(r.date)} stand-up; run a new one for today's view">${label} · ${days === 1 ? 'yesterday' : `${days} days ago`}</span>`
+    : `<span class="pill ${r.health}">${label}</span>`;
+}
+
+/** Whole days between a stand-up's date and today (0 for today's). */
+function standupAgeDays(r) {
+  if (!r || !/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) return 0;
+  const [y, m, d] = r.date.split('-').map(Number);
+  const then = new Date(y, m - 1, d);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.max(0, Math.round((today - then) / 864e5));
+}
+
+/** Long text in three lines, with a "More" button when it doesn't fit. */
+/** "25k new + 1.3M cached tokens": cached prompt text is cheap, so the two are shown apart. */
+function tokenWords(tk) {
+  const k = n => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+  const fresh = (tk.input || 0) + (tk.output || 0) + (tk.cacheWrite || 0);
+  return `<span title="${(tk.input || 0).toLocaleString()} input, ${(tk.output || 0).toLocaleString()} output, ${(tk.cacheWrite || 0).toLocaleString()} written to cache, ${(tk.cacheRead || 0).toLocaleString()} read from cache (about a tenth of the price)">${k(fresh)} new + ${k(tk.cacheRead || 0)} cached tokens</span>`;
+}
+
+function clampText(text, cls) {
+  if (!text) return '';
+  const long = text.length > 220;
+  return `<div class="${cls} clamp${long ? ' is-long' : ''}">${esc(text)}</div>${long ? '<button class="linkish clamp-more" data-unclamp>More</button>' : ''}`;
+}
+
+/** The Live panel when nothing is running: today's finished work, newest first. */
+function recentFeed() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const done = S.tasks.filter(t => t.endedAt && t.endedAt >= start.getTime() && ['done', 'failed', 'stopped'].includes(t.status))
+    .sort((a, b) => b.endedAt - a.endedAt).slice(0, 5);
+  if (!done.length) return '';
+  const word = t => (t.status === 'failed' ? 'failed' : t.status === 'stopped' ? 'stopped at a limit' : t.noChanges ? 'finished, no changes' : needsReview(t) ? 'ready for review' : 'finished');
+  return '<li class="f-head">Earlier today</li>' + done.map(t => `<li data-task="${t.id}" tabindex="0" role="button">${roleChip(t.role)}<span class="f-text"><b>${esc((projOf(t.projectId) || {}).name || '')}</b> ${esc(t.title)} · ${word(t)}</span><time>${ago(t.endedAt)}</time></li>`).join('');
 }
 
 function toast(msg, err = false) {
@@ -480,7 +520,7 @@ function renderOffice() {
   const running = S.tasks.filter(t => t.status === 'running');
   $('#officeFeed').innerHTML = items || (running.length
     ? running.map(t => `<li data-task="${t.id}" tabindex="0" role="button">${roleChip(t.role)}<span class="f-text"><b>${esc((projOf(t.projectId) || {}).name || '')}</b> ${esc(t.title)}</span></li>`).join('')
-    : '<li class="f-empty">Quiet right now. Assign a task and the work shows up here as it happens.</li>');
+    : recentFeed() || '<li class="f-empty">Quiet right now. Assign a task and the work shows up here as it happens.</li>');
 }
 
 /* ---------------- monday tickets, the agent card, people ---------------- */
@@ -736,7 +776,7 @@ function todayView() {
     const headline = rep ? (/##\s*Headline\s*\n+([^\n#][^\n]*)/i.exec(rep.markdown || '') || [])[1] || rep.healthReason : '';
     return `<div class="card proj-card">
       <div class="top"><h3><a href="#/p/${p.id}">${esc(p.name)}</a></h3>${healthPill(rep)}</div>
-      <div class="stack">${esc(p.stack || '')}</div>
+      ${clampText(p.stack || '', 'stack')}
       <div class="headline ${headline ? '' : 'none'}">${runningRep ? 'Writing today\'s stand-up…' : headline ? inline(headline) + `<div style="color:var(--faint);font-size:11.5px;margin-top:4px">${rep.date} stand-up</div>` : 'No stand-up yet. Run one to get the crew\'s view.'}</div>
       <div class="stats">
         <div><b>${num(ts.filter(t => t.status === 'running').length, p.id + '-run')}</b>working</div>
@@ -792,7 +832,7 @@ function projectView(p, tab) {
     <div class="page-head">
       <div>
         <h1>${esc(p.name)}</h1>
-        <div class="sub">${esc(p.stack)}${p.context ? ' — ' + esc(p.context) : ''}</div>
+        ${clampText(`${p.stack || ''}${p.context ? ` — ${p.context}` : ''}`, 'sub')}
         <div class="repo-chips">${p.exists
           ? (p.repos.map(r => `<span class="repo-chip" title="${esc(r.path)}">${esc(r.name)}</span>`).join('') || '<span class="repo-chip missing">no git repos in folder</span>')
           : `<span class="repo-chip missing" title="${esc(p.path)}">folder not found</span>`}</div>
@@ -1009,7 +1049,7 @@ async function renderCosts(main) {
   if (!$('#costsPage')) return; // navigated away meanwhile
   const o = d.options;
   const sel = (name, cur, opts, all) => `<select data-cost-filter="${name}" aria-label="${esc(all || name)}">${all ? `<option value="">${esc(all)}</option>` : ''}${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  const roleName = id => (S.roles.find(r => r.id === id) || {}).name || (id === 'stand-up' ? 'Stand-ups' : id);
+  const roleName = id => (S.roles.find(r => r.id === id) || {}).name || ({ 'stand-up': 'Stand-ups', 'graph-trial': 'Knowledge-graph trials' })[id] || id;
   const est = d.estimates;
   const empty = !d.totals.runs;
 
@@ -1515,7 +1555,7 @@ function refreshDrawer(first) {
       ${t.branch ? `<dt>Branch</dt><dd><code>${esc(t.branch)}</code> from <code>${esc(t.base)}</code></dd>` : t.base ? `<dt>Base</dt><dd><code>${esc(t.base)}</code></dd>` : ''}
       ${t.worktree ? `<dt>Worktree</dt><dd>${t.cleaned ? '<i>removed (branch kept)</i>' : `<code>${esc(t.worktree)}</code>`}</dd>` : ''}
       <dt>Assigned</dt><dd>${fmtTime(t.createdAt)}${t.endedAt ? ` · finished ${ago(t.endedAt)}` : ''}</dd>
-      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.wallMs ? ' · ' + dur(t.wallMs) : ''}${t.model ? ' · ' + esc(t.model) : ''}${t.tokens ? ` · ${(t.tokens.input + t.tokens.output + t.tokens.cacheRead + t.tokens.cacheWrite).toLocaleString()} tokens` : ''}</dd>` : ''}
+      ${t.turns ? `<dt>Usage</dt><dd>${t.turns} turns${t.costUsd ? ' · ' + money(t.costUsd) : ''}${t.wallMs ? ' · ' + dur(t.wallMs) : ''}${t.model ? ' · ' + esc(t.model) : ''}${t.tokens ? ` · ${tokenWords(t.tokens)}` : ''}</dd>` : ''}
       ${t.estimate ? `<dt>Estimate</dt><dd>${estRange(t.estimate)} <span style="color:var(--faint)">${t.estimate.basis === 'default' ? '(rough)' : `(from ${t.estimate.samples} past runs)`}</span>${etaText(t) ? ' · ' + esc(etaText(t)) : ''}</dd>` : ''}
       ${t.appliedLimits || t.limits ? (() => { const l = t.appliedLimits || {}; const parts = [l.taskBudgetUsd ? `$${l.taskBudgetUsd} per run` : '', l.taskTimeoutMin ? `${l.taskTimeoutMin} min per run` : ''].filter(Boolean); return parts.length ? `<dt>Limits</dt><dd>${parts.join(' · ')}</dd>` : ''; })() : ''}
     </dl>
@@ -1526,7 +1566,7 @@ function refreshDrawer(first) {
         ${g.commits.length ? `<div class="commits">${esc(g.commits.join('\n'))}</div>` : ''}
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
-    ${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
+    ${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
     ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
     ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.review && t.review.result ? t.result.replace(/\n##\s*Review\s*\n[\s\S]*$/i, '') : t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
@@ -1566,6 +1606,35 @@ function refreshDrawer(first) {
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) taskAction('followup'); });
   }
   if (first && ta && t.status !== 'failed') ta.blur();
+}
+
+/* ---------------- refused commands and empty runs (task drawer) ---------------- */
+
+/** Commands the agent was refused, each with a one-click "allow for this project". */
+function refusedHtml(t) {
+  const list = t.refused || [];
+  if (!list.length) return '';
+  const p = projOf(t.projectId);
+  const allowed = (p && p.allowCommands) || [];
+  const isAllowed = r => r.rule && allowed.includes(r.rule);
+  const rows = list.map(r => `<li>
+      <code class="cmdline">${esc(r.command)}</code>
+      <div class="refused-act">${isAllowed(r) ? `<span class="ok-text">Allowed now: <code>${esc(r.rule)}</code></span>`
+        : r.problem ? `<span class="faint">${esc(r.problem)}</span>`
+          : `<button class="btn sm" data-allow-rule="${esc(r.rule)}">Allow <code>${esc(r.rule)}</code> for ${esc(p ? p.name : 'this project')}</button>`}</div>
+    </li>`).join('');
+  const anyAllowed = list.some(isAllowed);
+  const canContinue = anyAllowed && !['running', 'queued'].includes(t.status) && !t.cleaned;
+  return `<div class="d-section refused"><h4>Commands refused <span class="faint">(${list.length})</span></h4>
+    <p class="hint">The agent tried these and the crew's permissions refused them, so some checks may not have run.${t.mode === 'analyze' ? ' Allowing a command applies to tasks that make changes; read-only tasks stay read-only.' : ''}</p>
+    <ul class="refused-list">${rows}</ul>
+    ${canContinue ? '<button class="btn sm primary" data-continue-allowed>Continue with the new permissions</button>' : ''}</div>`;
+}
+
+/** A change task that finished without changing anything: say so plainly. */
+function noChangesHtml(t) {
+  if (!t.noChanges || t.status !== 'done') return '';
+  return `<div class="d-section"><div class="notice"><b>No changes made.</b> This task finished without a single commit, so there is nothing to review. Read the report for why, then send a follow-up or assign it again.</div></div>`;
 }
 
 /* ---------------- Code Reviewer and Conflict Fixer (task drawer) ---------------- */
@@ -1656,15 +1725,26 @@ function planHtml(t) {
   if (!t.plan) return '';
   const steps = t.plan.steps;
   const ids = t.plan.taskIds || [];
+  const p = projOf(t.projectId);
+  const names = p ? p.repos.map(r => r.name) : [];
+  const missing = s => s.missingRepo || (s.repo && s.repo !== '*' && names.length && !names.includes(s.repo));
   const row = (s, i) => {
     const task = ids[i] && taskOf(ids[i]);
-    return `<li>${roleChip(s.role)} <b>${esc(s.title)}</b> <span class="faint">· ${modeWord(s.mode)}${s.repo ? ' · ' + esc(s.repo) : ''}${s.dependsOn.length ? ' · after ' + s.dependsOn.map(k => esc(k)).join(', ') : ''}</span>
+    const gone = missing(s);
+    // a plan started before this check existed may have run such a step in another repo
+    const warn = !gone ? ''
+      : task ? `This step's repo, <code>${esc(s.repo)}</code>, isn't in ${esc(p ? p.name : 'this project')}, so it ran in <code>${esc(task.repo)}</code> instead. New plans skip steps like this.`
+        : `Won't start: the <code>${esc(s.repo)}</code> repo isn't in ${esc(p ? p.name : 'this project')}. Clone it into the project folder to include it.`;
+    return `<li class="${gone && !task ? 'step-missing' : ''}">${roleChip(s.role)} <b>${esc(s.title)}</b> <span class="faint">· ${modeWord(s.mode)}${s.repo ? ' · ' + esc(s.repo) : ''}${s.dependsOn.length ? ' · after ' + s.dependsOn.map(k => esc(k)).join(', ') : ''}</span>
       ${task ? ` <button class="btn sm ghost" data-task="${task.id}">${statusPill(task)}</button>` : ''}
+      ${warn ? `<div class="step-warn">${warn}</div>` : ''}
       <div class="faint step-key">${esc(s.key)}</div></li>`;
   };
+  const runnable = steps.filter(s => !missing(s)).length;
+  const skipped = steps.filter((s, i) => missing(s) && !ids[i]).length;
   const acts = t.plan.status === 'proposed'
-    ? `<div class="card-actions"><button class="btn primary" data-plan="start">Start plan (${steps.length} tasks)</button><button class="btn ghost" data-plan="dismiss">Dismiss</button></div>`
-    : `<p class="hint">Plan ${esc(t.plan.status)}.</p>`;
+    ? `<div class="card-actions"><button class="btn primary" data-plan="start" ${runnable ? '' : 'disabled'}>Start plan (${runnable} task${runnable === 1 ? '' : 's'}${skipped ? `, ${skipped} skipped` : ''})</button><button class="btn ghost" data-plan="dismiss">Dismiss</button></div>`
+    : `<p class="hint">Plan ${esc(t.plan.status)}${skipped ? `; ${skipped} step${skipped === 1 ? ' was' : 's were'} not started because the repo isn't in the project` : ''}.</p>`;
   return `<div class="d-section"><h4>Plan</h4><ol class="plan">${steps.map(row).join('')}</ol>${acts}</div>`;
 }
 
@@ -2006,6 +2086,37 @@ document.addEventListener('click', async e => {
     const t = S.tasks.find(x => x.id === rb.dataset.reviewBranch);
     const rev = t && crewRoles(projOf(t.projectId)).find(r => r.kind === 'review');
     if (t && rev) openAssign({ projectId: t.projectId, role: rev.id, repo: t.repo, reviewBranch: t.branch, reviewBase: t.base });
+    return;
+  }
+  const um = e.target.closest('[data-unclamp]');
+  if (um) {
+    const box = um.previousElementSibling;
+    const open = box.classList.toggle('open');
+    um.textContent = open ? 'Less' : 'More';
+    return;
+  }
+  const ar = e.target.closest('[data-allow-rule]');
+  if (ar && drawer) {
+    const t = S.tasks.find(x => x.id === drawer.id);
+    const rule = ar.dataset.allowRule;
+    if (!t || !confirm(`Allow agents on ${(projOf(t.projectId) || {}).name || 'this project'} to run "${rule} …" from now on? You can remove it in Edit project → Extra allowed commands.`)) return;
+    ar.disabled = true;
+    try {
+      const r = await api(`/api/projects/${t.projectId}/allow`, { method: 'POST', body: { rule } });
+      const p = projOf(t.projectId);
+      if (p) p.allowCommands = r.allowCommands;
+      toast(`Allowed: ${rule}`);
+      refreshDrawer();
+    } catch (err) { toast(err.message, true); ar.disabled = false; }
+    return;
+  }
+  if (e.target.closest('[data-continue-allowed]') && drawer) {
+    const t = S.tasks.find(x => x.id === drawer.id);
+    const p = t && projOf(t.projectId);
+    const rules = (t.refused || []).filter(r => r.rule && ((p && p.allowCommands) || []).includes(r.rule)).map(r => r.rule);
+    const text = `The owner has now allowed: ${rules.join(', ')}. Continue the task: run the commands that were refused before (one per call), then build and test, and update your report with the real results.`;
+    try { await api(`/api/tasks/${t.id}/followup`, { method: 'POST', body: { text } }); toast('Continuing with the new permissions'); }
+    catch (err) { toast(err.message, true); }
     return;
   }
   if (e.target.closest('[data-review-post]') && drawer) {
