@@ -17,10 +17,12 @@ import { createMonday } from './lib/monday.mjs';
 import { search as searchPeople, directory, contactsFor } from './lib/people.mjs';
 import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
-import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH } from './lib/handoffs.mjs';
+import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH, integratePlan, planWaves } from './lib/handoffs.mjs';
+import { runChecks, qualityAllowRules, suggestQuality } from './lib/quality.mjs';
+import { parseLessons, lessonsFromTask, addLessons, lessonsPromptBlock, lessonKey, rank } from './lib/lessons.mjs';
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
-import { detectProject, findRepos } from './lib/detect.mjs';
+import { detectProject, findRepos, detectRepo } from './lib/detect.mjs';
 import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
 import { findGraph, graphDigest, graphPromptBlock, graphifyMcpCommand, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
 import { INTEGRATION_PRESETS, cleanIntegration, maskIntegrations, toolsFor, mcpFor, integrationsPromptBlock, webhooksFor, webhookBody, sendWebhook, testStdio, testHttp, writeMcpServers } from './lib/integrations.mjs';
@@ -383,12 +385,27 @@ async function execTask(t, handle) {
     if (kind === 'review' && !(t.review && t.review.branch) && prev && prev.branch) {
       t.review = { branch: prev.branch, base: prev.base || '', prNumber: '' };
     }
+    // A plan's merge step brings in the branches its parallel steps made (known only now).
+    if (kind === 'conflicts' && (t.mergeFrom || []).length && !t.sessionId) {
+      const from = t.mergeFrom.map(taskById);
+      if (from.some(x => !x || !x.branch)) throw new Error('One of the parallel steps to merge made no branch, so there is nothing to merge from it.');
+      t.mergeTargets = from.map(x => x.branch);
+      t.mergeTarget = t.mergeTargets[0];
+    }
+    // the task whose branch a review looks at (its checks go into the review)
+    const reviewed = kind === 'review' && t.review && t.review.branch
+      ? (prev && prev.branch === t.review.branch ? prev : S.tasks.find(x => x.branch === t.review.branch && x.id !== t.id)) || null
+      : null;
     // Remote branches move: fetch before a review or a merge that names one.
     if (repo && !t.sessionId && ((kind === 'review' && t.review) || (kind === 'conflicts' && t.mergeTarget))) {
       const refs = kind === 'review' ? [t.review.branch, t.review.base] : [t.mergeTarget, t.base];
       if (refs.some(r => String(r).startsWith('origin/')) && await G.fetchOrigin(repo.path)) log(t.id, 'sys', 'Fetched the latest branches from origin');
     }
-    if (kind === 'conflicts' && t.mergeTarget && repo && !(await G.refExists(repo.path, t.mergeTarget))) throw new Error(`The branch to merge in, ${t.mergeTarget}, no longer exists.`);
+    if (kind === 'conflicts' && t.mergeTarget && repo) {
+      for (const b of (t.mergeTargets || []).length ? t.mergeTargets : [t.mergeTarget]) {
+        if (!(await G.refExists(repo.path, b))) throw new Error(`The branch to merge in, ${b}, no longer exists.`);
+      }
+    }
     const sp = startPoint(prev, t.mode, t.repo);
     if (t.mode === 'change' && !t.worktree && !t.base && sp.base) t.base = sp.base;
     const readFrom = t.mode === 'analyze' && sp.readFrom && fs.existsSync(sp.readFrom) ? sp.readFrom : '';
@@ -453,11 +470,17 @@ async function execTask(t, handle) {
         // a plan step's next steps are the plan's own, so it proposes no handoffs of its own
         handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) || t.origin === 'plan' ? 'off' : policyFor(p),
         plan: !!t.planTask,
-        review: t.review, mergeTarget: t.mergeTarget,
+        review: t.review, mergeTarget: t.mergeTarget, mergeTargets: t.mergeTargets,
+        // the project's quality bar, what the checks said about a reviewed branch, and lessons
+        quality: p.quality, stack: p.stack,
+        checks: reviewed && (reviewed.checks || []).length ? reviewed.checks : null,
+        lessons: lessonsPromptBlock((S.lessons || {})[lessonKey(p.id, t.repo)]),
+        graphTools: graphCtx.tools.length > 0,
+        canMerge: !!mergeRoleOf(p),
       }),
       mode: t.mode,
       kind,
-      extraCommands: [...(cfg.settings.allowCommands || []), ...(p.allowCommands || [])],
+      extraCommands: [...(cfg.settings.allowCommands || []), ...(p.allowCommands || []), ...qualityAllowRules(p.quality)],
       model,
       resume,
       addDirs,
@@ -503,6 +526,8 @@ async function execTask(t, handle) {
     }
     if (kind === 'review' && t.review && res.result) {
       const found = parseReview(res.result);
+      // a branch whose own checks failed is never approved
+      if (found && found.verdict === 'approve' && reviewed && (reviewed.checks || []).some(c => !c.ok && !c.skipped)) found.verdict = 'request_changes';
       if (found) t.review = { ...t.review, result: found, posted: null };
       else log(t.id, 'warn', 'The review had no "## Review" block, so there is nothing to post. The report is still below.');
     }
@@ -513,6 +538,24 @@ async function execTask(t, handle) {
       t.merge = { state: unfinished ? 'unfinished' : merged ? 'merged' : 'not-merged', at: Date.now() };
       if (unfinished) log(t.id, 'warn', 'The merge is not finished: conflicts are still open in the worktree. Send a follow-up to finish it, or assign it again.');
       else if (merged) log(t.id, 'sys', `${t.branch} now contains ${t.mergeTarget}.`);
+      if (!unfinished && (t.mergeTargets || []).length > 1) {
+        const all = [];
+        for (const b of t.mergeTargets) all.push(await G.isAncestor(t.worktree, b, 'HEAD'));
+        t.merge.state = all.every(Boolean) ? 'merged' : 'not-merged';
+        if (t.merge.state === 'merged') log(t.id, 'sys', `${t.branch} now holds all ${t.mergeTargets.length} parallel branches.`);
+      }
+    }
+    // The project's own checks, run by Dev Crew on the branch: the agent's word is not the proof.
+    if (t.mode === 'change' && t.worktree && res.ok && !handle.cancelled && !handle.limitHit && !t.noChanges
+      && !(t.merge && t.merge.state === 'unfinished') && p.quality && p.quality.verify && Object.keys(p.quality.commands).length) {
+      t.checking = true;
+      touchTask(t);
+      t.checks = await runChecks(p.quality, t.worktree, { onStart: (l, c) => log(t.id, 'sys', `Checking: ${l} (${c})`), isCancelled: () => handle.cancelled });
+      delete t.checking;
+      t.checksAt = Date.now();
+      const bad = t.checks.filter(c => !c.ok && !c.skipped);
+      if (bad.length) log(t.id, 'warn', `Checks failed: ${bad.map(c => c.label).join(', ')}. Their output is on the task.`);
+      else if (t.checks.length) log(t.id, 'sys', `Checks passed: ${t.checks.map(c => c.label).join(', ')}`);
     }
     t.stopReason = '';
     if (handle.cancelled) { t.status = 'cancelled'; t.error = 'Cancelled.'; }
@@ -530,6 +573,7 @@ async function execTask(t, handle) {
     }
     else if (res.ok) { t.status = 'done'; takeNextSteps(t, p, res.result); }
     else { t.status = 'failed'; t.error = res.error; log(t.id, 'err', res.error); }
+    if (t.status === 'done' || t.status === 'failed') learnFrom({ ...t, refused: (t.refused || []).slice(refusedBefore) }, p, res.result);
   } catch (e) {
     t.status = handle.cancelled ? 'cancelled' : 'failed';
     t.error = e.message;
@@ -811,6 +855,8 @@ const publicProject = p => ({
   mondayBoardId: p.monday ? String(p.monday.boardId || '') : '',
   knowledgeGraph: p.knowledgeGraph,
   graphUpdate: p.graphUpdate,
+  quality: p.quality,
+  lessonCount: Object.entries(S.lessons || {}).filter(([k]) => k.startsWith(`${p.id}/`)).reduce((n, [, l]) => n + l.length, 0),
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
 
@@ -876,6 +922,24 @@ function followRepo(p, spec, prev) {
   throw new Error(`No repo for "${spec.title}": name one of ${names.join(', ') || '(none found)'}.`);
 }
 
+/** The project's Conflict Fixer (it merges the branches of parallel plan steps), or ''. */
+function mergeRoleOf(p) {
+  const r = ROLES.find(x => x.kind === 'conflicts' && (!p || !p.activeRoles || p.activeRoles.includes(x.id)));
+  return r ? r.id : '';
+}
+
+/** Keep what a finished run taught us about its repo, for the next runs there. */
+function learnFrom(t, p, result) {
+  const items = [...parseLessons(result).map(text => ({ text, source: 'agent' })), ...lessonsFromTask(t)];
+  if (!items.length) return;
+  S.lessons = S.lessons || {};
+  const key = lessonKey(p.id, t.repo);
+  const { list, added } = addLessons(S.lessons[key], items, { taskId: t.id, newId: () => newId('') });
+  S.lessons[key] = list;
+  if (added) log(t.id, 'sys', `Learned ${added} new lesson(s) about ${t.repo && t.repo !== '*' ? t.repo : p.name}.`);
+  store.save();
+}
+
 /** Start one proposed handoff: a new task that builds on its parent. */
 function startHandoff(parent, h) {
   const p = project(parent.projectId);
@@ -911,11 +975,13 @@ function startPlan(planTask) {
     const depTasks = deps.map(taskById);
     // Build on the latest dependency that changes the same repo; else read the latest one.
     const repo = followRepo(p, s, depTasks[depTasks.length - 1] || null);
-    const prev = [...depTasks].reverse().find(d => d.mode === 'change' && d.repo === repo) || depTasks[depTasks.length - 1] || planTask;
+    const prev = (s.buildOn && idByKey[s.buildOn] && taskById(idByKey[s.buildOn]))
+      || [...depTasks].reverse().find(d => d.mode === 'change' && d.repo === repo) || depTasks[depTasks.length - 1] || planTask;
     const child = createTaskFromSpec({
       projectId: planTask.projectId, role: s.role, mode: s.mode, repo, title: s.title, details: s.details,
       parentId: planTask.id, prevId: prev.id, dependsOn: deps.length ? deps : [planTask.id],
       chainDepth: (planTask.chainDepth || 0) + 1, origin: 'plan', planKey: s.key,
+      mergeFrom: s.integrate ? (s.mergeIn || []).map(k => idByKey[k]).filter(Boolean) : [],
     }, { deferPump: true });
     idByKey[s.key] = child.id;
     made.push(child);
@@ -924,6 +990,8 @@ function startPlan(planTask) {
   if (!made.length) throw new Error('Every step of this plan is for a repo that is not in the project, so nothing was started.');
   Object.assign(plan, { status: 'started', taskIds: ids });
   log(planTask.id, 'sys', `Plan started: ${made.length} linked task(s).`);
+  const widest = Math.max(0, ...planWaves(plan.steps).map(w => w.length));
+  if (widest > cfg.settings.maxConcurrent) log(planTask.id, 'sys', `Up to ${widest} steps can run at the same time; Settings allows ${cfg.settings.maxConcurrent} agent(s) at a time, so the rest wait their turn.`);
   if (skipped.length) log(planTask.id, 'warn', `Not started, because their repo is not in ${p.name}: ${skipped.map(x => `"${x}"`).join(', ')}.`);
   pump();
   return made;
@@ -934,7 +1002,7 @@ function takeNextSteps(t, p, result) {
   const policy = policyFor(p);
   const roleIds = (p && p.activeRoles && p.activeRoles.length) ? p.activeRoles : ROLES.map(r => r.id);
   if (t.planTask) {
-    const steps = parsePlan(result, { roleIds, repoNames: p ? p.repos.map(r => r.name) : null });
+    const steps = integratePlan(parsePlan(result, { roleIds, repoNames: p ? p.repos.map(r => r.name) : null }), { mergeRole: mergeRoleOf(p) });
     if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
     t.plan = { steps, status: 'proposed' };
     if (policy === 'auto') {
@@ -1031,7 +1099,7 @@ function createTaskFromSpec(spec, { deferPump = false } = {}) {
     ticket: spec.ticket || null, limits: spec.limits || {},
     planTask: !!spec.planTask, parentId: spec.parentId || '', prevId: spec.prevId || '', dependsOn: spec.dependsOn || [],
     chainDepth: spec.chainDepth || 0, origin: spec.origin || 'owner', planKey: spec.planKey || '',
-    review: spec.review || null, mergeTarget: spec.mergeTarget || '',
+    review: spec.review || null, mergeTarget: spec.mergeTarget || '', mergeFrom: spec.mergeFrom || [],
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
   };
   // Kept so the cost page can later compare what we expected with what happened.
@@ -1285,6 +1353,54 @@ async function route(req, res, url) {
     return send(res, 200, { ...found, id, repos: found.repos.map(r => ({ name: r.name, stack: r.stack })) });
   }
 
+  /* ----- lessons from past runs ----- */
+  if (parts[1] === 'projects' && parts[2] && parts[3] === 'lessons') {
+    const p = project(parts[2]);
+    if (!p) return send(res, 404, { error: 'No such project.' });
+    S.lessons = S.lessons || {};
+    const keys = [...new Set([...p.repos.map(r => lessonKey(p.id, r.name)), ...Object.keys(S.lessons).filter(k => k.startsWith(`${p.id}/`))])];
+    const find = id => { for (const k of keys) { const l = (S.lessons[k] || []).find(x => x.id === id); if (l) return { k, l }; } return null; };
+    const view = () => ({ repos: keys.map(k => ({ repo: k.slice(p.id.length + 1), lessons: rank(S.lessons[k] || []) })) });
+    if (m === 'GET' && !parts[4]) return send(res, 200, view());
+    if (m === 'POST' && !parts[4]) {
+      const b = await readBody(req);
+      const repo = String(b.repo || '').trim();
+      if (!p.repos.some(r => r.name === repo) && repo !== '*') return send(res, 400, { error: 'Pick one of the project\'s repos.' });
+      const text = String(b.text || '').trim();
+      if (text.length < 12) return send(res, 400, { error: 'Write the lesson as a sentence (at least 12 characters).' });
+      const key = lessonKey(p.id, repo);
+      const { list } = addLessons(S.lessons[key], [{ text, source: 'owner' }], { newId: () => newId('') });
+      const mine = list.find(l => l.text === text.replace(/\s+/g, ' ').slice(0, 240));
+      if (mine) mine.pinned = true;
+      S.lessons[key] = rank(list);
+      store.save();
+      return send(res, 200, view());
+    }
+    const hit = parts[4] ? find(parts[4]) : null;
+    if (!hit) return send(res, 404, { error: 'That lesson is gone.' });
+    if (m === 'PATCH') {
+      const b = await readBody(req);
+      if (b.pinned !== undefined) hit.l.pinned = !!b.pinned;
+      if (b.muted !== undefined) hit.l.muted = !!b.muted;
+      if (typeof b.text === 'string' && b.text.trim().length >= 12) hit.l.text = b.text.trim().replace(/\s+/g, ' ').slice(0, 240);
+      store.save();
+      return send(res, 200, view());
+    }
+    if (m === 'DELETE') {
+      S.lessons[hit.k] = S.lessons[hit.k].filter(x => x !== hit.l);
+      store.save();
+      return send(res, 200, view());
+    }
+  }
+
+  // GET /api/projects/:id/quality/suggest: check commands that fit what the repos are built with
+  if (m === 'GET' && parts[1] === 'projects' && parts[2] && parts[3] === 'quality' && parts[4] === 'suggest') {
+    const p = project(parts[2]);
+    if (!p) return send(res, 404, { error: 'No such project.' });
+    const stack = p.repos.filter(r => r.exists).flatMap(r => { try { return detectRepo(r.path).stack; } catch { return []; } });
+    return send(res, 200, { commands: suggestQuality([...stack, p.stack || '']), stack: [...new Set(stack)] });
+  }
+
   // The raw project as written in the config, for the editor.
   if (m === 'GET' && parts[1] === 'projects' && parts[2] && parts[3] === 'config') {
     const rawP = (readRaw().projects || []).find(p => p.id === parts[2]);
@@ -1355,6 +1471,10 @@ async function route(req, res, url) {
     const list = Array.isArray(rawP.allowCommands) ? rawP.allowCommands : [];
     if (!list.includes(r)) rawP.allowCommands = [...list, r];
     writeRaw(raw);
+    for (const [k, l] of Object.entries(S.lessons || {})) {
+      if (k.startsWith(`${parts[2]}/`)) S.lessons[k] = l.filter(x => !(x.source === 'refused' && x.text.includes(`\`${r}`)));
+    }
+    store.save();
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true, allowCommands: rawP.allowCommands });
