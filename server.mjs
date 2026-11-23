@@ -24,6 +24,8 @@ import { detectProject, findRepos } from './lib/detect.mjs';
 import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
 import { findGraph, graphDigest, graphPromptBlock, graphifyMcpCommand, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
 import { INTEGRATION_PRESETS, cleanIntegration, maskIntegrations, toolsFor, mcpFor, integrationsPromptBlock, webhooksFor, webhookBody, sendWebhook, testStdio, testHttp, writeMcpServers } from './lib/integrations.mjs';
+import { showToast, toastSupported, createActionLinks } from './lib/toast.mjs';
+import { detectAlerts } from './public/alerts.js';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -361,6 +363,7 @@ function slug(s) {
 }
 
 async function execTask(t, handle) {
+  const refusedBefore = (t.refused || []).length; // for "commands were refused in this run" alerts
   t.error = '';
   touchTask(t);
   let repo = null;
@@ -535,6 +538,63 @@ async function execTask(t, handle) {
   t.endedAt = Date.now();
   touchTask(t);
   notifyWebhooks(t);
+  notifyDesktop(t, refusedBefore);
+}
+
+/* ---------------- Windows notifications from the server (no browser needed) ---------------- */
+
+const actionLinks = createActionLinks();
+// When you are looking at the dashboard, it shows its own alerts; the server keeps quiet then.
+const presence = { visible: false, at: 0 };
+const dashboardWatched = () => presence.visible && Date.now() - presence.at < 45000;
+
+function notifyDesktop(t, refusedBefore = 0) {
+  const d = cfg.settings.desktopAlerts;
+  if (!toastSupported() || !d || !d.enabled || dashboardWatched()) return;
+  const p = project(t.projectId);
+  const alerts = detectAlerts({ status: 'running', refused: new Array(refusedBefore) }, t, {
+    roleName,
+    projectName: id => (project(id) || {}).name || id,
+    hasReviewer: () => !!p && ROLES.some(r => r.kind === 'review' && p.activeRoles.includes(r.id)),
+  });
+  const base = `http://localhost:${LISTEN_PORT}`;
+  for (const a of alerts) {
+    if (!d.events[a.event]) continue;
+    const buttons = a.actions.map(x => ({
+      label: x.label,
+      url: x.kind === 'api' ? `${base}/act/${actionLinks.make({ taskId: t.id, id: x.id, path: x.path, doneText: x.doneText, doneBody: x.doneBody })}` : `${base}/${x.url}`,
+    }));
+    showToast({ title: a.title, body: a.body, launch: `${base}/${a.url}`, buttons, tag: a.key })
+      .then(r => { if (!r.ok) console.warn('Windows notification failed:', r.error); });
+  }
+}
+
+/** /act/<token>: the one-time link behind a notification's Start plan / Start handoff button. */
+function runActionLink(token, res) {
+  const page = (title, body, taskId) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(`<!doctype html><meta charset="utf-8"><title>Dev Crew</title><meta name="viewport" content="width=device-width,initial-scale=1">${taskId ? `<meta http-equiv="refresh" content="2;url=/#/t/${taskId}">` : ''}<body style="font:15px system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;height:100vh;margin:0;background:#f2f3f7;color:#1d1d1f"><div style="background:#fff;padding:28px 32px;border-radius:18px;box-shadow:0 10px 40px rgba(0,0,0,.08);max-width:420px"><h2 style="margin:0 0 8px">${esc(title)}</h2><p style="margin:0 0 16px;color:#55595f">${esc(body)}</p><a href="/#/${taskId ? `t/${taskId}` : 'today'}" style="color:#0066cc">Open Dev Crew</a></div></body>`);
+  };
+  const esc = s => String(s || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const a = actionLinks.take(token);
+  if (!a) return page('This link has been used', 'Each notification button works once, for a day. Open Dev Crew to see where things stand.');
+  const t = taskById(a.taskId);
+  if (!t) return page('That task is gone', 'It may have been deleted or archived.');
+  try {
+    if (a.id === 'plan') {
+      if (!t.plan || t.plan.status !== 'proposed') return page('Already handled', `This plan was already ${t.plan ? t.plan.status : 'removed'}.`, t.id);
+      startPlan(t);
+    } else if (a.id === 'handoff') {
+      const hid = (/handoffs\/([^/]+)\/start/.exec(a.path) || [])[1];
+      const h = (t.handoffs || []).find(x => x.id === hid);
+      if (!h || (h.status !== 'proposed' && h.status !== 'failed')) return page('Already handled', `This handoff was already ${h ? h.status : 'removed'}.`, t.id);
+      startHandoff(t, h);
+    } else return page('Unknown action', 'Open Dev Crew to do this by hand.', t.id);
+    touchTask(t);
+    return page(a.doneText || 'Done', a.doneBody || '', t.id);
+  } catch (e) {
+    return page('Could not do that', e.message, t.id);
+  }
 }
 
 /** Tell the webhooks in Settings → Integrations that a task finished, failed or needs you. */
@@ -762,6 +822,7 @@ async function stateView() {
       limits: cfg.settings.limits,
       handoffs: cfg.settings.handoffs,
       ui: cfg.settings.ui,
+      desktopAlerts: { ...cfg.settings.desktopAlerts, supported: toastSupported() },
     },
     spend: spendView(),
     etas: etas(),
@@ -1390,6 +1451,21 @@ async function route(req, res, url) {
     return send(res, 200, { ok: true, restartNeeded: cfg.settings.port !== LISTEN_PORT, port: cfg.settings.port });
   }
 
+  /* ----- alerts ----- */
+  // POST /api/presence {visible}: the dashboard says whether you are looking at it
+  if (m === 'POST' && url.pathname === '/api/presence') {
+    const { visible } = await readBody(req);
+    presence.visible = !!visible;
+    presence.at = Date.now();
+    return send(res, 200, { ok: true });
+  }
+  // POST /api/alerts/test: a sample Windows notification from the server
+  if (m === 'POST' && url.pathname === '/api/alerts/test') {
+    const base = `http://localhost:${LISTEN_PORT}`;
+    const r = await showToast({ title: 'Ready for review: Add paging to GET /invoices', body: 'Backend Engineer on DataEz · 2 commits (a test notification from Dev Crew)', launch: `${base}/#/today`, buttons: [{ label: 'Review', url: `${base}/#/today` }], tag: 'test' });
+    return send(res, r.ok ? 200 : 400, r.ok ? { ok: true } : { error: r.error });
+  }
+
   /* ----- Settings: roles editor ----- */
   // GET /api/roles: every role with its instructions, and the built-in defaults for "Reset".
   if (m === 'GET' && url.pathname === '/api/roles') {
@@ -1550,6 +1626,7 @@ const server = http.createServer(async (req, res) => {
   const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: LISTEN_PORT });
   if (refused) return send(res, refused.code, { error: refused.error });
   try {
+    if (req.method === 'GET' && url.pathname.startsWith('/act/')) return runActionLink(url.pathname.slice(5), res);
     if (url.pathname.startsWith('/api/')) return await route(req, res, url);
     const file = path.join(PUBLIC, url.pathname === '/' ? 'index.html' : path.normalize(url.pathname));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {

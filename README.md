@@ -156,11 +156,14 @@ your system's "reduce motion" setting turns that off.
 **Alerts.** When something needs you, Dev Crew says so with what happened and buttons to act on it:
 a branch ready for review (**Review**, **Ask the Code Reviewer**), a plan ready (**Start plan**), a
 suggested handoff (**Start handoff**), a task that failed, stopped at a limit or made no changes, and
-refused commands. While you are looking at Dev Crew they appear at the top right; while it is in the
-background they can come as system notifications, whose buttons work without opening the page.
-Turn them on and pick the events in Settings → General → Alerts (saved per browser; keep a Dev
-Crew tab open, minimised is fine). Embedded browsers may not allow system notifications; Chrome and
-Edge do.
+refused commands. While you are looking at Dev Crew they appear at the top right. When you are
+not (another app in front, the browser minimised or closed), the Dev Crew server itself shows a
+**Windows notification** at the bottom right of the screen, so you hear about it while you work on
+something else. Its buttons open the task, or start the plan or handoff straight away through a
+one-time link (`/act/<token>`: it works once and expires after a day). Windows notifications are on by
+default on Windows; turn them off, pick the events and send a test in Settings → General → Alerts. If
+nothing shows, check Windows Settings → System → Notifications and Do not disturb. On other systems,
+browser notifications are the fallback (they need a Dev Crew tab open).
 
 **Full-width view.** The ☰ button at the top left (or Ctrl+B) hides the side menu, so the office
 and every page use the whole window; press it again to bring the menu back. The browser remembers
@@ -442,6 +445,7 @@ lib/roles.mjs       the built-in roles, custom roles from the config
 lib/review.mjs      the Code Reviewer's verdict and findings, and posting them with gh
 lib/graph.mjs       knowledge-graph context from graphify (digest or graph tools)
 lib/integrations.mjs  tools and notifications added in Settings (MCP servers, webhooks)
+lib/toast.mjs       Windows notifications from the server, and their one-time action links
 scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists

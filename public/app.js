@@ -1722,11 +1722,26 @@ function raiseAlerts(prev, t) {
 }
 
 /** In the page when you are looking at it; as a system notification when it is in the background. */
-async function deliverAlert(a, prefs = alertPrefs()) {
+async function deliverAlert(a, prefs = alertPrefs(), { test = false } = {}) {
   const away = document.visibilityState !== 'visible' || !document.hasFocus();
-  if (prefs.system && away && 'Notification' in window && Notification.permission === 'granted' && await showSystemAlert(a)) return;
+  const serverToasts = !test && serverToastsOn();
+  if (away && serverToasts) return; // the Dev Crew server shows a Windows notification instead
+  if (prefs.system && away && !serverToasts && 'Notification' in window && Notification.permission === 'granted' && await showSystemAlert(a)) return;
   if (prefs.inApp) showInAppAlert(a);
 }
+const serverToastsOn = () => !!(S && S.settings.desktopAlerts && S.settings.desktopAlerts.enabled && S.settings.desktopAlerts.supported);
+
+// Tell the server whether you are looking at Dev Crew, so it does not also send a Windows
+// notification for something already on your screen.
+let presenceSent = null;
+function sendPresence() {
+  const v = document.visibilityState === 'visible' && document.hasFocus();
+  if (v === presenceSent && !v) return;
+  presenceSent = v;
+  fetch('/api/presence', { method: 'POST', headers: { 'x-dev-crew': '1', 'content-type': 'application/json' }, body: JSON.stringify({ visible: v }), keepalive: true }).catch(() => {});
+}
+['visibilitychange', 'focus', 'blur'].forEach(ev => window.addEventListener(ev, sendPresence));
+setInterval(() => { if (document.visibilityState === 'visible' && document.hasFocus()) { presenceSent = null; sendPresence(); } }, 25000);
 
 async function showSystemAlert(a) {
   try {
@@ -1792,12 +1807,15 @@ function openTaskLink() {
 function alertSettingsHtml() {
   const p = alertPrefs();
   const perm = !('Notification' in window) ? 'unsupported' : Notification.permission;
-  return `<p class="hint">Dev Crew tells you when something needs you. In the page, alerts appear at the top right; when Dev Crew is in the background, they can come as system notifications with buttons (Start plan, Start handoff, Review). These choices are saved in this browser.</p>
-    <label class="check"><input type="checkbox" data-alert-pref="inApp" ${p.inApp ? 'checked' : ''}> Show alerts in Dev Crew (top right)</label>
-    <label class="check"><input type="checkbox" data-alert-pref="system" ${p.system && perm === 'granted' ? 'checked' : ''} ${perm === 'unsupported' || perm === 'denied' ? 'disabled' : ''}> Also as system notifications when Dev Crew is in the background</label>
-    <p class="hint" id="alertPerm">${perm === 'denied' ? 'Notifications are blocked for this site: allow them in the browser\'s site settings (the icon left of the address), then reload.' : perm === 'unsupported' ? 'This browser has no system notifications.' : perm === 'default' ? 'The browser will ask for permission when you turn this on.' : 'Allowed in this browser.'} Keep a Dev Crew tab open (it can be minimised); notifications come from that tab.</p>
+  const d = (S && S.settings.desktopAlerts) || {};
+  return `<p class="hint">Dev Crew tells you when something needs you, with what happened and buttons to act on it (Review, Start plan, Start handoff).</p>
+    <label class="check"><input type="checkbox" data-desktop-alerts ${d.enabled ? 'checked' : ''} ${d.supported ? '' : 'disabled'}> <b>Windows notifications from Dev Crew itself</b>: they arrive while you work on something else, even with the browser minimised or closed (Dev Crew must be running)</label>
+    ${d.supported ? '<div class="card-actions" style="margin:2px 0 10px"><button type="button" class="btn sm" data-desktop-test>Send a test Windows notification</button><span class="hint">If nothing appears, check Windows Settings → System → Notifications (and Do not disturb / Focus).</span></div>' : '<p class="hint">Windows notifications need Dev Crew running on Windows.</p>'}
+    <label class="check"><input type="checkbox" data-alert-pref="inApp" ${p.inApp ? 'checked' : ''}> Show alerts in Dev Crew (top right) while you are looking at it</label>
+    <label class="check"><input type="checkbox" data-alert-pref="system" ${p.system && perm === 'granted' ? 'checked' : ''} ${perm === 'unsupported' || perm === 'denied' || d.enabled ? 'disabled' : ''}> Browser notifications instead ${d.enabled ? '(not needed: Windows notifications are on)' : '(needs a Dev Crew tab open)'}</label>
+    <p class="hint" id="alertPerm" ${d.enabled ? 'hidden' : ''}>${perm === 'denied' ? 'Notifications are blocked for this site: allow them in the browser\'s site settings (the icon left of the address), then reload.' : perm === 'unsupported' ? 'This browser has no system notifications.' : perm === 'default' ? 'The browser will ask for permission when you turn this on.' : 'Allowed in this browser.'} Keep a Dev Crew tab open (it can be minimised); notifications come from that tab.</p>
     <div class="int-checks">${ALERT_EVENTS.map(([k, l]) => `<label class="check"><input type="checkbox" data-alert-ev="${k}" ${p.events[k] ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div>
-    <div class="card-actions" style="margin-top:8px"><button type="button" class="btn sm" data-alert-test>Send a test alert</button><span class="hint">The test comes as a system notification after 4 seconds if you switch away; otherwise at the top right.</span></div>`;
+    <div class="card-actions" style="margin-top:8px"><button type="button" class="btn sm" data-alert-test>Send a test in-page alert</button><span class="hint">Shows at the top right of Dev Crew.</span></div>`;
 }
 
 document.addEventListener('change', async e => {
@@ -1805,7 +1823,10 @@ document.addEventListener('change', async e => {
   const ev = e.target.dataset && e.target.dataset.alertEv;
   if (!pref && !ev) return;
   const p = alertPrefs();
-  if (ev) p.events[ev] = e.target.checked;
+  if (ev) {
+    p.events[ev] = e.target.checked;
+    api('/api/settings', { method: 'PUT', body: { desktopAlerts: { events: { [ev]: e.target.checked } } } }).catch(err => toast(err.message, true));
+  }
   if (pref === 'inApp') p.inApp = e.target.checked;
   if (pref === 'system') {
     if (e.target.checked && Notification.permission !== 'granted') {
@@ -1818,11 +1839,24 @@ document.addEventListener('change', async e => {
   saveAlertPrefs(p);
   toast('Saved in this browser');
 });
+document.addEventListener('change', async e => {
+  if (!e.target.matches || !e.target.matches('[data-desktop-alerts]')) return;
+  try {
+    await api('/api/settings', { method: 'PUT', body: { desktopAlerts: { enabled: e.target.checked } } });
+    if (S) S.settings.desktopAlerts = { ...S.settings.desktopAlerts, enabled: e.target.checked };
+    toast(e.target.checked ? 'Windows notifications on' : 'Windows notifications off');
+  } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+});
+document.addEventListener('click', async e => {
+  if (!e.target.closest('[data-desktop-test]')) return;
+  try { await api('/api/alerts/test', { method: 'POST' }); toast('Test notification sent: look at the bottom right of your screen'); }
+  catch (err) { toast(`Could not show it: ${err.message}`, true); }
+});
 document.addEventListener('click', e => {
   if (!e.target.closest('[data-alert-test]')) return;
   const sample = { key: `test:${Date.now()}`, event: 'review', taskId: '', url: '#/today', title: 'Ready for review: Add paging to GET /invoices', body: 'Backend Engineer on DataEz · 2 commits · 3 files changed (a test alert)', actions: [{ id: 'open', label: 'Review', kind: 'open', url: '#/today' }, { id: 'later', label: 'Later', kind: 'open', url: '#/today' }] };
   toast('Test alert in 4 seconds');
-  setTimeout(() => deliverAlert(sample), 4000);
+  setTimeout(() => deliverAlert(sample, alertPrefs(), { test: true }), 4000);
 });
 
 /* ---------------- project editor (add / edit) ---------------- */
