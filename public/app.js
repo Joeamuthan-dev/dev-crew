@@ -2361,9 +2361,10 @@ function checksHtml(t) {
   if (t.checking) return '<div class="d-section"><h4>Checks</h4><p class="hint">Dev Crew is running the project\'s checks on this branch…</p></div>';
   const c = t.checks || [];
   if (!c.length) return '';
-  const bad = c.filter(x => !x.ok && !x.skipped).length;
-  return `<div class="d-section"><h4>Checks ${bad ? `<span class="verdict bad">${bad} failed</span>` : '<span class="verdict ok">passed</span>'}</h4>
-    <ul class="checks">${c.map(x => `<li class="${x.ok ? 'ok' : x.skipped ? 'skip' : 'bad'}"><div><span class="chk">${x.ok ? '✓' : x.skipped ? '–' : '✕'}</span> <b>${esc(x.label)}</b> <code>${esc(x.cmd)}</code> <span class="faint">${x.skipped ? 'skipped' : x.ms ? dur(x.ms) : ''}</span></div>${x.tail ? `<details ${x.ok || x.skipped ? '' : 'open'}><summary>Output</summary><pre class="commits">${esc(x.tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+  const bad = c.filter(x => !x.ok && !x.skipped && !x.preexisting).length;
+  const old = c.filter(x => x.preexisting).length;
+  return `<div class="d-section"><h4>Checks ${bad ? `<span class="verdict bad">${bad} failed</span>` : '<span class="verdict ok">passed</span>'}${old ? ` <span class="verdict info" title="These fail on the branch's starting point too, so this change did not cause them">${old} already failing before</span>` : ''}</h4>
+    <ul class="checks">${c.map(x => `<li class="${x.ok ? 'ok' : x.skipped || x.preexisting ? 'skip' : 'bad'}"><div><span class="chk">${x.ok ? '✓' : x.skipped ? '–' : x.preexisting ? '!' : '✕'}</span> <b>${esc(x.label)}</b> <code>${esc(x.cmd)}</code> <span class="faint">${x.skipped ? 'skipped' : x.preexisting ? 'already failing before this change' : x.ms ? dur(x.ms) : ''}</span></div>${x.tail ? `<details ${x.ok || x.skipped || x.preexisting ? '' : 'open'}><summary>Output</summary><pre class="commits">${esc(x.tail)}</pre></details>` : ''}</li>`).join('')}</ul>
     <p class="hint">${bad && t.status === 'done' ? 'Send a follow-up asking for a fix; Dev Crew runs the checks again after it. ' : ''}Ran ${t.checksAt ? ago(t.checksAt) : ''} in the task's worktree.</p></div>`;
 }
 

@@ -162,3 +162,38 @@ test('the planner is told it may plan parallel steps only when there is a Confli
   assert.match(taskSystemPrompt(p, 'architect', 'analyze', { cwd: '/x', plan: true, canMerge: false }), /put the steps that change the same repo in a chain/);
   assert.match(taskSystemPrompt(p, 'conflicts', 'change', { cwd: '/x', branch: 'b', base: 'a', mergeTarget: 'x', mergeTargets: ['x', 'y'] }), /git merge --no-ff --no-edit x, then git merge --no-ff --no-edit y/);
 });
+
+/* ---------------- checks compared with where the branch started ---------------- */
+import { failedChecks } from '../lib/quality.mjs';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import * as G from '../lib/git.mjs';
+
+test('only failures the change caused count; ones that already failed before do not', () => {
+  const checks = [{ ok: true }, { ok: false, skipped: true }, { ok: false, preexisting: true }, { ok: false, label: 'Tests' }];
+  assert.deepEqual(failedChecks(checks).map(c => c.label), ['Tests']);
+  assert.deepEqual(failedChecks(undefined), []);
+  assert.match(qualityPromptBlock(cleanQuality({}), { forReview: true, checks: [{ label: 'Format check', ok: false, preexisting: true }] }), /already failed before this change/);
+  assert.doesNotMatch(qualityPromptBlock(cleanQuality({}), { forReview: true, checks: [{ label: 'Format check', ok: false, preexisting: true }] }), /at least a major finding/);
+  assert.equal(lessonsFromTask({ checks: [{ label: 'Format check', cmd: 'x', ok: false, preexisting: true }] }).length, 0);
+});
+
+test('a check can be run again on the commit a branch started from', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-base-'));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' }).toString().trim();
+  g('init', '-q', '-b', 'main');
+  g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, 'state.txt'), 'bad');
+  g('add', '.'); g('commit', '-q', '-m', 'base');
+  const sha = g('rev-parse', 'HEAD');
+  const dir = path.join(repo, '..', path.basename(repo) + '-wt');
+  await G.addDetachedWorktree(repo, dir, sha);
+  const check = cleanQuality({ commands: { lint: 'node -e "process.exit(require(\'fs\').readFileSync(\'state.txt\',\'utf8\')===\'bad\'?1:0)"' } });
+  const [r] = await runChecks(check, dir);
+  assert.equal(r.ok, false); // fails at the base too: not the branch's fault
+  await G.removeWorktree(repo, dir);
+  assert.equal(fs.existsSync(dir), false);
+  fs.rmSync(repo, { recursive: true, force: true });
+});

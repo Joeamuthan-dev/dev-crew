@@ -18,7 +18,7 @@ import { search as searchPeople, directory, contactsFor } from './lib/people.mjs
 import { checkRequest } from './lib/guard.mjs';
 import { resolveLimits, cleanLimits, estimate, queueEta, spendToday, limitState } from './lib/limits.mjs';
 import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHAIN_DEPTH, integratePlan, planWaves } from './lib/handoffs.mjs';
-import { runChecks, qualityAllowRules, suggestQuality } from './lib/quality.mjs';
+import { runChecks, qualityAllowRules, suggestQuality, failedChecks } from './lib/quality.mjs';
 import { parseLessons, lessonsFromTask, addLessons, lessonsPromptBlock, lessonKey, rank } from './lib/lessons.mjs';
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
@@ -527,7 +527,7 @@ async function execTask(t, handle) {
     if (kind === 'review' && t.review && res.result) {
       const found = parseReview(res.result);
       // a branch whose own checks failed is never approved
-      if (found && found.verdict === 'approve' && reviewed && (reviewed.checks || []).some(c => !c.ok && !c.skipped)) found.verdict = 'request_changes';
+      if (found && found.verdict === 'approve' && reviewed && failedChecks(reviewed.checks).length) found.verdict = 'request_changes';
       if (found) t.review = { ...t.review, result: found, posted: null };
       else log(t.id, 'warn', 'The review had no "## Review" block, so there is nothing to post. The report is still below.');
     }
@@ -551,9 +551,13 @@ async function execTask(t, handle) {
       t.checking = true;
       touchTask(t);
       t.checks = await runChecks(p.quality, t.worktree, { onStart: (l, c) => log(t.id, 'sys', `Checking: ${l} (${c})`), isCancelled: () => handle.cancelled });
+      // A check that also fails where the branch started is not this change's fault.
+      if (t.checks.some(c => !c.ok && !c.skipped) && t.baseSha && repo && !handle.cancelled) await compareWithBase(t, repo, p.quality);
       delete t.checking;
       t.checksAt = Date.now();
-      const bad = t.checks.filter(c => !c.ok && !c.skipped);
+      const bad = failedChecks(t.checks);
+      const old = t.checks.filter(c => c.preexisting);
+      if (old.length) log(t.id, 'sys', `Already failing before this change (not counted): ${old.map(c => c.label).join(', ')}`);
       if (bad.length) log(t.id, 'warn', `Checks failed: ${bad.map(c => c.label).join(', ')}. Their output is on the task.`);
       else if (t.checks.length) log(t.id, 'sys', `Checks passed: ${t.checks.map(c => c.label).join(', ')}`);
     }
@@ -920,6 +924,26 @@ function followRepo(p, spec, prev) {
   if (pick) return pick;
   if (spec.mode === 'analyze') return '*';
   throw new Error(`No repo for "${spec.title}": name one of ${names.join(', ') || '(none found)'}.`);
+}
+
+/** Run the failed checks again on the commit the branch started from; mark those that fail there too. */
+async function compareWithBase(t, repo, quality) {
+  const failed = t.checks.filter(c => !c.ok && !c.skipped);
+  const dir = path.join(WT_DIR, '_base', `${t.id}-${Date.now().toString(36)}`);
+  try {
+    log(t.id, 'sys', `Checking whether ${failed.map(c => c.label).join(', ')} already failed before this change…`);
+    await G.addDetachedWorktree(repo.path, dir, t.baseSha);
+    const only = { ...quality, commands: Object.fromEntries(failed.map(c => [c.kind, c.cmd])) };
+    const base = await runChecks(only, dir);
+    for (const c of failed) {
+      const b = base.find(x => x.kind === c.kind);
+      if (b && !b.ok && !b.skipped) c.preexisting = true;
+    }
+  } catch (e) {
+    log(t.id, 'warn', `Could not compare with the starting point: ${e.message}`);
+  } finally {
+    await G.removeWorktree(repo.path, dir).catch(() => {});
+  }
 }
 
 /** The project's Conflict Fixer (it merges the branches of parallel plan steps), or ''. */
