@@ -318,51 +318,30 @@ off at 09:00, the stand-up runs as soon as Dev Crew starts that day.
 
 ## Settings
 
-**Settings** in the sidebar holds the app-wide options, saved to `crew.config.local.json` (validated
-and backed up like project edits) and applied straight away, without a restart:
+**Settings** in the sidebar holds the app-wide options, in tabs, with a **Find a setting** box that
+searches all of them. Everything is saved to `crew.config.local.json` (validated, with the
+previous version kept) and applies straight away; only a new port needs a restart.
 
-- **Agents:** default model, stand-up model, how many agents run at once.
-- **Limits:** cost and time per run, daily spend, when to warn.
-- **Handoffs:** ask, start automatically, or off.
-- **Daily stand-up:** on or off, time, weekdays only.
-- **Housekeeping:** how long to keep worktrees and tasks, weekly clean-up.
-- **Appearance:** theme, motion (full, reduced or off), 3D quality (high, medium, low), and a
-  simple 2D office instead of the 3D one.
-- **monday.com:** the API token (stored, never shown again; blank keeps it) and API version.
-- **Permissions:** what agents may run and what is always refused (read-only).
-- **Advanced:** the Claude command, and passing a parent Claude session's variables through.
+- **General:** default and stand-up models, agents at a time, limits (cost and time per run, daily
+  spend, when to warn), handoffs, the daily stand-up, housekeeping.
+- **Crew & roles:** every role as a card. **Edit** changes its name, colour, tag, whether it
+  usually reads or changes code, and its instructions; **Reset to built-in** undoes your changes.
+  **Add a role** creates your own (for example a Security Engineer). Each role saves on its own.
+- **Permissions:** extra commands agents may run in every project, as chips you add or remove, with
+  ready-made sets per stack (.NET, Node, Python, Java, Go, Docker). The built-in list and the
+  always-refused list are shown; deleting, pushing, merging, downloading and chained commands can
+  never be allowed.
+- **Integrations:** a status light for Claude Code, Git, the GitHub CLI (and whether it is signed
+  in), monday.com (and whether the token works) and graphify, with **Check again**; the monday.com
+  token and API version.
+- **Appearance:** theme, motion, 3D quality, and the simple 2D office.
+- **Advanced:** port, workspace folder, Claude command, permission mode, strict MCP, passing a
+  parent Claude session's variables through; the list of backups with **Restore**, and **Export** /
+  **Import** of the whole setup (export leaves out the monday.com token; import keeps this
+  machine's).
 
-The workspace folder and the port are shown but changed in the file (they need a restart).
-
-## Knowledge graph (optional)
-
-If you have run [graphify](https://pypi.org/project/graphifyy/) in a repo (it leaves a
-`graphify-out/` folder), agents can use that graph of the code. Turn it on per project in **Edit
-project → Knowledge graph** (or `"knowledgeGraph"` in the config). It is off by default.
-
-- **Digest in the prompt** (`"summary"`): a short summary of `GRAPH_REPORT.md` (the most connected
-  classes and one line per area of the code) goes into every run's instructions. About 1,500 extra
-  tokens per run.
-- **Graph tools** (`"tools"`): the agent gets graphify's read-only graph tools (query the graph,
-  look up a class and its neighbours, the path between two classes) through `graphify-mcp`. It
-  needs graphify's MCP extra: `uv tool install "graphifyy[mcp]"`. The PR tools graphify also
-  offers stay off.
-
-**The Graph tab.** Each project page has a **Graph** tab with graphify's interactive map of the
-repo (search a class or file, click a node to see what it connects to, filter by area), how fresh
-it is (when it was built and how many commits have landed on the checked-out branch since), and
-**Update graph**, which re-reads the code with `graphify update` (no AI, no cost) and refreshes the
-view. **Keep it current** chooses how it updates by itself: only when you press Update, after new
-commits (checked every half hour), or once a week. The first graph of a repo is built with
-`/graphify` in Claude Code; after that Dev Crew keeps it up to date. graphify must be installed
-where Dev Crew runs (`uv tool install "graphifyy[mcp]" --python 3.12`).
-
-**Measure it before you keep it on.** `npm run graph-trial -- --project <id>` runs the same three
-read-only questions on a repo with no graph, with the digest and with the graph tools, and writes
-a comparison (cost, prompt tokens, turns, time, searches) plus every answer to
-`data/graph-trial/`. Each run is a paid Claude Code session; `--budget` caps each run (default
-$1.50) and `--max-total` the whole trial (default $10). Your own questions go in a JSON list with
-`--questions file.json`.
+Per project, **Edit project** also sets a cost and time limit for each role, and the monday.com
+board (picked from the boards your token can see).
 
 ## Keep it running
 

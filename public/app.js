@@ -1196,10 +1196,23 @@ function office2dView() {
 
 /* ---------------- settings page ---------------- */
 
+const SETTINGS_TABS = [['general', 'General'], ['roles', 'Crew & roles'], ['permissions', 'Permissions'], ['integrations', 'Integrations'], ['appearance', 'Appearance'], ['advanced', 'Advanced']];
+// Ready-made command sets per stack, on top of what agents may always run.
+const PERMISSION_PRESETS = {
+  '.NET': ['dotnet tool restore', 'dotnet tool run', 'dotnet ef', 'dotnet pack'],
+  Node: ['npm audit', 'npx playwright', 'npx cypress run', 'npx biome', 'node'],
+  Python: ['poetry', 'uv run', 'tox', 'python -m ruff', 'python -m black'],
+  Java: ['java -version', 'javac'],
+  Go: ['golangci-lint', 'go mod'],
+  Docker: ['docker build', 'docker compose config'],
+};
+let settingsTab = 'general';
+
 async function renderSettings(main) {
   main.innerHTML = '<div id="settingsPage"><div class="empty">Loading settings…</div></div>';
   let d;
-  try { d = await api('/api/settings'); } catch (e) {
+  let rolesData;
+  try { [d, rolesData] = await Promise.all([api('/api/settings'), api('/api/roles')]); } catch (e) {
     $('#settingsPage').innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
     return;
   }
@@ -1215,94 +1228,182 @@ async function renderSettings(main) {
     .concat(['sonnet', 'opus', 'haiku'].includes(cur) ? [] : [[cur, cur]]).map(([v, t]) => opt(v, cur, t)).join('');
   const seg = (name, cur, choices) => `<div class="seg">${choices.map(([v, t]) => `<label><input type="radio" name="${name}" value="${v}" ${v === cur ? 'checked' : ''}><span>${t}</span></label>`).join('')}</div>`;
   const chips = list => list.map(c => `<code class="perm">${esc(c)}</code>`).join(' ');
+  const sec = (tab, title, body, extra = '') => `<section class="card set-sec" data-tab="${tab}"${extra}><h2>${title}</h2>${body}</section>`;
 
   $('#settingsPage').innerHTML = `
-    <div class="page-head"><div><h1>Settings</h1><div class="sub">Saved to <code>${esc(e.configFile)}</code>; the previous version is kept in <code>data/config-backups</code>. Changes apply straight away.</div></div></div>
-    <form id="settingsForm" class="settings">
-      <section class="card set-sec"><h2>Agents</h2>
-        <div class="grid3">
+    <div class="page-head"><div><h1>Settings</h1><div class="sub">Saved to <code>${esc(e.configFile)}</code>; the previous version is kept and can be restored (Advanced). Changes apply straight away.</div></div></div>
+    <div class="set-nav">
+      <nav class="tabs" aria-label="Settings sections">${SETTINGS_TABS.map(([k, t]) => `<button type="button" class="tab ${settingsTab === k ? 'active' : ''}" data-set-tab="${k}" ${settingsTab === k ? 'aria-current="page"' : ''}>${t}</button>`).join('')}</nav>
+      <input type="search" id="settingsSearch" placeholder="Find a setting…" aria-label="Find a setting">
+    </div>
+    <form id="settingsForm" class="settings" data-active="${settingsTab}">
+      ${sec('general', 'Agents', `<div class="grid3">
           <div class="field"><label>Default model</label><select name="model">${models(e.model)}</select></div>
           <div class="field"><label>Stand-up model</label><select name="reportModel">${models(e.reportModel)}</select></div>
           <div class="field"><label>Agents at a time</label><input type="number" name="maxConcurrent" min="1" max="8" step="1" value="${e.maxConcurrent}"><span class="hint">More run in parallel, and spend faster.</span></div>
-        </div>
-      </section>
-
-      <section class="card set-sec"><h2>Limits</h2>
-        <p class="hint">Defaults for every run. Projects, roles and single tasks can override them. 0 means no limit.</p>
+        </div>`)}
+      ${sec('general', 'Limits', `<p class="hint">Defaults for every run. Projects and roles can override them in Edit project, and single tasks in the Assign dialog. 0 means no limit.</p>
         <div class="grid4">
           <div class="field"><label>Cost per run (USD)</label><input type="number" name="taskBudgetUsd" min="0" step="0.5" value="${l.taskBudgetUsd}"></div>
           <div class="field"><label>Time per run (minutes)</label><input type="number" name="taskTimeoutMin" min="0" step="5" value="${l.taskTimeoutMin}"></div>
           <div class="field"><label>Daily spend (USD)</label><input type="number" name="dailyBudgetUsd" min="0" step="1" value="${l.dailyBudgetUsd}"></div>
           <div class="field"><label>Warn at (%)</label><input type="number" name="warnAtPercent" min="50" max="95" step="5" value="${Math.round(l.warnAt * 100)}"></div>
-        </div>
-      </section>
-
-      <section class="card set-sec"><h2>Handoffs</h2>
-        <p class="hint">When a finished task says another role should act next. Projects can override this.</p>
-        ${seg('handoffs', e.handoffs, [['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']])}
-      </section>
-
-      <section class="card set-sec"><h2>Daily stand-up</h2>
-        <div class="grid3">
+        </div>`)}
+      ${sec('general', 'Handoffs', `<p class="hint">When a finished task says another role should act next. Projects can override this.</p>
+        ${seg('handoffs', e.handoffs, [['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']])}`)}
+      ${sec('general', 'Daily stand-up', `<div class="grid3">
           <label class="check"><input type="checkbox" name="drEnabled" ${dr.enabled ? 'checked' : ''}> Write a stand-up for every project each morning</label>
           <div class="field"><label>Time</label><input type="time" name="drAt" value="${esc(dr.at)}"></div>
           <label class="check"><input type="checkbox" name="drWeekdays" ${dr.weekdaysOnly ? 'checked' : ''}> Weekdays only</label>
         </div>
-        <p class="hint">Each stand-up is a paid run (usually a few cents). It only happens while Dev Crew is running.</p>
-      </section>
-
-      <section class="card set-sec"><h2>Housekeeping</h2>
-        <div class="grid3">
+        <p class="hint">Each stand-up is a paid run (usually a few cents). It only happens while Dev Crew is running.</p>`)}
+      ${sec('general', 'Housekeeping', `<div class="grid3">
           <div class="field"><label>Remove finished worktrees after (days)</label><input type="number" name="worktreeDays" min="0" step="1" value="${hk.worktreeDays}"></div>
           <div class="field"><label>Archive tasks after (days)</label><input type="number" name="taskDays" min="0" step="1" value="${hk.taskDays}"></div>
           <label class="check"><input type="checkbox" name="hkAuto" ${hk.auto ? 'checked' : ''}> Clean up by itself once a week</label>
         </div>
-        <p class="hint">Unmerged work, worktrees with uncommitted changes and anything a queued task needs are never touched. <a href="#" data-housekeeping>Open Housekeeping</a></p>
-      </section>
+        <p class="hint">Unmerged work, worktrees with uncommitted changes and anything a queued task needs are never touched. <a href="#" data-housekeeping>Open Housekeeping</a></p>`)}
 
-      <section class="card set-sec"><h2>Appearance</h2>
-        <div class="set-rows">
-          <div><label class="set-label">Theme</label>${seg('theme', ui.theme, [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']])}</div>
-          <div><label class="set-label">Motion</label>${seg('motion', ui.motion, [['full', 'Full'], ['reduced', 'Reduced'], ['off', 'Off']])}<span class="hint">Reduced: agents stay at their desks. Off: nothing moves.</span></div>
-          <div><label class="set-label">3D quality</label>${seg('quality', ui.quality, [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']])}<span class="hint">Lower it on slow laptops or remote desktops.</span></div>
-          <div><label class="set-label">Office</label>${seg('officeView', ui.officeView, [['3d', '3D office'], ['2d', 'Simple 2D view']])}</div>
-        </div>
-      </section>
+      ${sec('roles', 'Roles', `<p class="hint">Every project gets these seats; turn them on or off per project in Edit project, and give each role notes about your code there. Here you change what a role is: its name, colour, whether it reads or changes code, and its instructions. Each role saves on its own.</p>
+        <div id="roleCards">${roleCardsHtml(rolesData)}</div>
+        <button type="button" class="btn" data-role-add>+ Add a role</button>`)}
 
-      <section class="card set-sec"><h2>monday.com</h2>
-        ${d.mondayTokenFromEnv ? '<p class="hint">A token is set in the <code>MONDAY_API_TOKEN</code> environment variable; it is used instead of the one below.</p>' : ''}
+      ${sec('permissions', 'Allowed commands', `<p class="hint">Agents that make changes may run the built-in build, test and git commands below, plus these, in every project. Projects can add their own in Edit project, and a task's panel offers to allow a command it was refused. Deleting, pushing, merging, downloading and chained commands are always refused.</p>
+        <textarea name="allowCommands" hidden>${esc((e.allowCommands || []).join('\n'))}</textarea>
+        <div class="perm-edit" id="permEdit"></div>
+        <div class="row-inline"><input type="text" id="permNew" placeholder="e.g. npm run e2e" maxlength="60"><button type="button" class="btn sm" data-perm-add>Add</button></div>
+        <div class="perm-presets"><span class="faint">Add a set for your stack:</span> ${Object.keys(PERMISSION_PRESETS).map(k => `<button type="button" class="chip-btn" data-perm-preset="${esc(k)}">${esc(k)}</button>`).join('')}</div>`)}
+      ${sec('permissions', 'Built in <span class="faint">(read-only)</span>', `<details><summary>What agents may always run (${d.permissions.change.length} commands for changes, ${d.permissions.analyze.length} for read-only work)</summary>
+          <h4>Make changes</h4><div class="perm-list">${chips(d.permissions.change)}</div>
+          <h4>Conflict Fixer, in addition</h4><div class="perm-list">${chips(['git merge'])}</div>
+          <h4>Investigate &amp; report</h4><div class="perm-list">${chips(d.permissions.analyze)}</div></details>
+        <h4>Always refused</h4><div class="perm-list">${chips(d.permissions.denied)}</div>
+        ${d.permissions.projects.some(p => p.extra.length) ? `<h4>Extra, per project</h4>${d.permissions.projects.filter(p => p.extra.length).map(p => `<div><b>${esc(p.name)}</b>: ${chips(p.extra)}</div>`).join('')}` : ''}`)}
+
+      ${sec('integrations', 'Connections', `<p class="hint">What Dev Crew uses on this machine, and whether it works.</p>
+        <ul class="checks" id="checkList"><li class="faint">Checking…</li></ul>
+        <button type="button" class="btn sm" data-recheck>Check again</button>`)}
+      ${sec('integrations', 'monday.com', `${d.mondayTokenFromEnv ? '<p class="hint">A token is set in the <code>MONDAY_API_TOKEN</code> environment variable; it is used instead of the one below.</p>' : ''}
         <div class="grid3">
           <div class="field"><label>API token ${mon.tokenSet ? `<span class="faint">(saved, ends ${esc(mon.tokenHint)})</span>` : ''}</label><input type="password" name="mondayToken" autocomplete="off" placeholder="${mon.tokenSet ? 'Leave blank to keep the saved token' : 'Paste a token to connect'}"></div>
           <div class="field"><label>API version <span class="faint">(optional)</span></label><input type="text" name="mondayApiVersion" value="${esc(mon.apiVersion || '')}" placeholder="e.g. 2024-10"></div>
           ${mon.tokenSet ? '<label class="check"><input type="checkbox" name="mondayClear"> Remove the saved token</label>' : '<span></span>'}
         </div>
-        <p class="hint">The token is stored in <code>crew.config.local.json</code> and never shown again here. Board ids are set per project.</p>
-      </section>
+        <p class="hint">The token is stored in <code>crew.config.local.json</code> and never shown again here. Pick each project's board in Edit project.</p>`)}
 
-      <section class="card set-sec"><h2>Roles <span class="faint">(read-only)</span></h2>
-        <p class="hint">Every project gets these seats; turn them on or off per project in Edit project. Add your own, or change a built-in one, with a <code>"roles"</code> list in <code>crew.config.local.json</code>, for example <code>{"id": "security", "name": "Security Engineer", "color": "#e11d48", "defaultMode": "analyze", "prompt": "You are the Security Engineer…"}</code>, then restart.</p>
-        <ul class="role-list">${S.roles.map(r => `<li>${roleChip(r.id)} <b>${esc(r.name)}</b> <span class="faint">· ${r.defaultMode === 'analyze' ? 'reads' : 'changes code'}${r.kind === 'review' ? ' · reviews branches and pull requests' : r.kind === 'conflicts' ? ' · may run git merge in its own worktree' : ''}${r.builtIn ? '' : ' · custom'}</span>${r.focus ? `<div class="faint">${esc(r.focus)}</div>` : ''}</li>`).join('')}</ul>
-      </section>
+      ${sec('appearance', 'Appearance', `<div class="set-rows">
+          <div><label class="set-label">Theme</label>${seg('theme', ui.theme, [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']])}</div>
+          <div><label class="set-label">Motion</label>${seg('motion', ui.motion, [['full', 'Full'], ['reduced', 'Reduced'], ['off', 'Off']])}<span class="hint">Reduced: agents stay at their desks. Off: nothing moves.</span></div>
+          <div><label class="set-label">3D quality</label>${seg('quality', ui.quality, [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']])}<span class="hint">Lower it on slow laptops or remote desktops.</span></div>
+          <div><label class="set-label">Office</label>${seg('officeView', ui.officeView, [['3d', '3D office'], ['2d', 'Simple 2D view']])}</div>
+        </div>`)}
 
-      <section class="card set-sec"><h2>Permissions <span class="faint">(read-only)</span></h2>
-        <p class="hint">What agents may run. Anything else is refused and shown in the task log.</p>
-        <h4>Make changes</h4><div class="perm-list">${chips(d.permissions.change)}</div>
-        <h4>Conflict Fixer, in addition</h4><div class="perm-list">${chips(['git merge'])}</div>
-        <h4>Investigate &amp; report</h4><div class="perm-list">${chips(d.permissions.analyze)}</div>
-        <h4>Always refused</h4><div class="perm-list">${chips(d.permissions.denied)}</div>
-        ${d.permissions.projects.some(p => p.extra.length) ? `<h4>Extra, per project</h4>${d.permissions.projects.filter(p => p.extra.length).map(p => `<div><b>${esc(p.name)}</b>: ${chips(p.extra)}</div>`).join('')}` : ''}
-      </section>
-
-      <details class="card set-sec"><summary><h2 style="display:inline">Advanced</h2></summary>
-        <div class="grid3">
+      ${sec('advanced', 'Running Dev Crew', `<div class="grid2">
+          <div class="field"><label>Port</label><input type="number" name="port" min="1024" max="65535" value="${e.port}"><span class="hint">Takes effect after a restart.</span></div>
+          <div class="field"><label>Workspace folder <span class="faint">(where project folders live)</span></label><input type="text" name="workspace" value="${esc(e.workspace || e.workspacePath)}"><span class="hint">Now: ${esc(e.workspacePath)}</span></div>
           <div class="field"><label>Claude command</label><input type="text" name="claudeCommand" value="${esc(e.claudeCommand)}"><span class="hint">${d.claude.found ? `Found: ${esc(d.claude.version)}` : '<span style="color:var(--red)">Not found</span>'}</span></div>
-          <label class="check"><input type="checkbox" name="inheritClaudeEnv" ${e.inheritClaudeEnv ? 'checked' : ''}> Pass a parent Claude session's variables to agents</label>
-          <div class="field"><label>Workspace</label><input type="text" value="${esc(e.workspacePath)}" readonly><span class="hint">Port ${e.port}. Change these in the file, then restart.</span></div>
+          <div class="field"><label>Permission mode</label><select name="permissionMode">${(e.permissionModes || ['']).map(v => opt(v, e.permissionMode, { '': 'Automatic (recommended)', default: 'default: ask (agents stop at any prompt)', acceptEdits: 'acceptEdits: allow file edits', dontAsk: 'dontAsk: refuse anything not allowed' }[v] || v)).join('')}</select><span class="hint">Automatic uses dontAsk when this Claude Code has it.</span></div>
         </div>
-      </details>
+        <label class="check"><input type="checkbox" name="strictMcp" ${e.strictMcp ? 'checked' : ''}> Agents use no MCP servers except the ones Dev Crew gives them (strict MCP)</label>
+        <label class="check"><input type="checkbox" name="inheritClaudeEnv" ${e.inheritClaudeEnv ? 'checked' : ''}> Pass a parent Claude session's variables to agents</label>`)}
+      ${sec('advanced', 'Backups, export and import', `<p class="hint">Every save keeps the previous file. Restoring also keeps the current one first, so it can be undone. Export leaves out the monday.com token; import keeps this machine's token.</p>
+        <div class="card-actions"><a class="btn sm" href="/api/config/export" download>Export settings</a><label class="btn sm file-btn">Import settings…<input type="file" id="importFile" accept=".json,application/json" hidden></label></div>
+        <ul class="backups" id="backupList"><li class="faint">Loading backups…</li></ul>`)}
 
       <div class="set-save"><button class="btn primary" id="settingsSave">Save settings</button><span class="hint" id="settingsMsg"></span></div>
+      <p class="empty set-none" hidden>No setting matches that search.</p>
     </form>`;
+
+  // allowed commands as chips (stored in the hidden textarea, saved with the rest)
+  const permBox = $('#settingsForm').elements.allowCommands;
+  const permList = () => permBox.value.split('\n').map(x => x.trim()).filter(Boolean);
+  const drawPerms = () => {
+    const list = permList();
+    $('#permEdit').innerHTML = list.length
+      ? list.map(c => `<span class="perm-chip"><code>${esc(c)}</code><button type="button" class="icon-x" data-perm-del="${esc(c)}" aria-label="Remove ${esc(c)}">✕</button></span>`).join('')
+      : '<span class="faint">None yet.</span>';
+  };
+  const addPerms = cmds => {
+    const list = permList();
+    for (const c of cmds) { const v = c.trim().replace(/\s+/g, ' '); if (v && !list.includes(v)) list.push(v); }
+    permBox.value = list.join('\n');
+    drawPerms();
+    $('#settingsMsg').textContent = 'Not saved yet: press Save settings.';
+  };
+  drawPerms();
+  loadChecks();
+  loadBackups();
+
+  const page = $('#settingsPage');
+  page.addEventListener('click', async ev => {
+    const t = ev.target.closest('[data-set-tab]');
+    if (t) {
+      settingsTab = t.dataset.setTab;
+      $('#settingsForm').dataset.active = settingsTab;
+      page.querySelectorAll('[data-set-tab]').forEach(b => { b.classList.toggle('active', b === t); b.toggleAttribute('aria-current', b === t); });
+      $('#settingsSearch').value = '';
+      filterSettings('');
+      return;
+    }
+    if (ev.target.closest('[data-perm-add]')) { addPerms([$('#permNew').value]); $('#permNew').value = ''; return; }
+    const pp = ev.target.closest('[data-perm-preset]');
+    if (pp) { addPerms(PERMISSION_PRESETS[pp.dataset.permPreset]); return; }
+    const pd = ev.target.closest('[data-perm-del]');
+    if (pd) { permBox.value = permList().filter(c => c !== pd.dataset.permDel).join('\n'); drawPerms(); $('#settingsMsg').textContent = 'Not saved yet: press Save settings.'; return; }
+    if (ev.target.closest('[data-recheck]')) { loadChecks(); return; }
+    const rs = ev.target.closest('[data-restore]');
+    if (rs) {
+      if (!confirm(`Restore the settings saved ${rs.dataset.when}? The current file is kept as a backup first.`)) return;
+      try { await api('/api/config/restore', { method: 'POST', body: { name: rs.dataset.restore } }); toast('Settings restored'); page.remove(); renderSettings($('#main')); }
+      catch (err) { toast(err.message, true); }
+      return;
+    }
+    // roles editor
+    const re = ev.target.closest('[data-role-edit]');
+    if (re) { openRoleEditor(rolesData, re.dataset.roleEdit); return; }
+    if (ev.target.closest('[data-role-add]')) { openRoleEditor(rolesData, ''); return; }
+    if (ev.target.closest('[data-role-cancel]')) { $('#roleCards').innerHTML = roleCardsHtml(rolesData); return; }
+    const rr = ev.target.closest('[data-role-reset]');
+    if (rr) {
+      const r = rolesData.roles.find(x => x.id === rr.dataset.roleReset);
+      const builtIn = !!rolesData.defaults[rr.dataset.roleReset];
+      if (!confirm(builtIn ? `Reset the ${r.name} to Dev Crew's built-in version?` : `Remove the ${r.name} role? Projects stop using it; its past tasks stay.`)) return;
+      try {
+        await api(`/api/roles/${encodeURIComponent(rr.dataset.roleReset)}`, { method: 'DELETE' });
+        rolesData = await api('/api/roles');
+        $('#roleCards').innerHTML = roleCardsHtml(rolesData);
+        toast(builtIn ? 'Role reset' : 'Role removed');
+      }
+      catch (err) { toast(err.message, true); }
+      return;
+    }
+    const rsv = ev.target.closest('[data-role-save]');
+    if (rsv) {
+      const box = rsv.closest('.role-editor');
+      const val = n => box.querySelector(`[name=${n}]`).value;
+      const id = (val('r_id') || '').trim().toLowerCase();
+      if (!id) return toast('Give the role an id', true);
+      if (!val('r_name').trim() || !val('r_prompt').trim()) return toast('A role needs a name and instructions', true);
+      rsv.disabled = true;
+      try {
+        await api(`/api/roles/${encodeURIComponent(id)}`, { method: 'PUT', body: { name: val('r_name'), short: val('r_short'), color: val('r_color'), defaultMode: val('r_mode'), focus: val('r_focus'), prompt: val('r_prompt') } });
+        rolesData = await api('/api/roles');
+        $('#roleCards').innerHTML = roleCardsHtml(rolesData);
+        toast('Role saved');
+      } catch (err) { toast(err.message, true); rsv.disabled = false; }
+    }
+  });
+  page.addEventListener('change', async ev => {
+    if (ev.target.id !== 'importFile' || !ev.target.files[0]) return;
+    let config;
+    try { config = JSON.parse(await ev.target.files[0].text()); } catch { ev.target.value = ''; return toast('That file is not valid JSON', true); }
+    const n = Array.isArray(config.projects) ? config.projects.length : 0;
+    if (!confirm(`Replace your settings with this file (${n} project${n === 1 ? '' : 's'})? The current settings are kept as a backup and can be restored.`)) { ev.target.value = ''; return; }
+    try { const r = await api('/api/config/import', { method: 'POST', body: { config } }); toast(`Imported: ${r.projects} project(s)`); page.remove(); renderSettings($('#main')); }
+    catch (err) { toast(err.message, true); ev.target.value = ''; }
+  });
+  $('#settingsSearch').addEventListener('input', ev => filterSettings(ev.target.value));
+  $('#permNew').addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); addPerms([ev.target.value]); ev.target.value = ''; } });
 
   const form = $('#settingsForm');
   form.addEventListener('submit', async ev => {
@@ -1317,13 +1418,14 @@ async function renderSettings(main) {
       housekeeping: { worktreeDays: F.worktreeDays.value, taskDays: F.taskDays.value, auto: F.hkAuto.checked },
       ui: { theme: radio('theme'), motion: radio('motion'), quality: radio('quality'), officeView: radio('officeView') },
       monday: { token: F.mondayToken.value, apiVersion: F.mondayApiVersion.value, clearToken: !!(F.mondayClear && F.mondayClear.checked) },
-      advanced: { claudeCommand: F.claudeCommand.value, inheritClaudeEnv: F.inheritClaudeEnv.checked },
+      advanced: { claudeCommand: F.claudeCommand.value, inheritClaudeEnv: F.inheritClaudeEnv.checked, port: F.port.value, workspace: F.workspace.value, permissionMode: F.permissionMode.value, strictMcp: F.strictMcp.checked },
+      allowCommands: F.allowCommands.value,
     };
     const btn = $('#settingsSave');
     btn.disabled = true;
     try {
-      await api('/api/settings', { method: 'PUT', body });
-      toast('Settings saved');
+      const r = await api('/api/settings', { method: 'PUT', body });
+      toast(r.restartNeeded ? `Saved. Restart Dev Crew to use port ${r.port}.` : 'Settings saved');
       $('#settingsPage').remove();
       renderSettings($('#main')); // show what was stored (e.g. the token hint)
     } catch (err) {
@@ -1333,6 +1435,83 @@ async function renderSettings(main) {
       btn.disabled = false;
     }
   });
+}
+
+/** Search: show the sections (from every tab) whose text matches; empty search = the current tab. */
+function filterSettings(q) {
+  const form = $('#settingsForm');
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  form.classList.toggle('searching', words.length > 0);
+  let any = false;
+  form.querySelectorAll('.set-sec').forEach(s => {
+    const hit = !words.length || words.every(w => s.textContent.toLowerCase().includes(w) || [...s.querySelectorAll('input,select,textarea')].some(i => (i.name || '').toLowerCase().includes(w)));
+    s.classList.toggle('search-hit', words.length > 0 && hit);
+    if (words.length && hit) any = true;
+  });
+  form.querySelector('.set-none').hidden = !words.length || any;
+}
+
+async function loadChecks() {
+  const box = $('#checkList');
+  if (!box) return;
+  box.innerHTML = '<li class="faint">Checking…</li>';
+  try {
+    const { checks } = await api('/api/checks');
+    if (!$('#checkList')) return;
+    box.innerHTML = checks.map(c => `<li class="check-row ${c.ok ? 'ok' : 'bad'}"><span class="check-dot" aria-hidden="true"></span><div><b>${esc(c.name)}</b> <span class="sr-only">${c.ok ? 'working' : 'needs attention'}</span><div>${esc(c.detail || '')}</div><div class="faint">${esc(c.needed || '')}</div></div></li>`).join('');
+  } catch (e) { box.innerHTML = `<li class="err-inline">${esc(e.message)}</li>`; }
+}
+
+async function loadBackups() {
+  const box = $('#backupList');
+  if (!box) return;
+  try {
+    const { backups } = await api('/api/config/backups');
+    if (!$('#backupList')) return;
+    box.innerHTML = backups.length
+      ? backups.map(b => `<li><span>${fmtTime(b.at)} <span class="faint">· ${ago(b.at)} · ${b.projects} project${b.projects === 1 ? '' : 's'}</span></span><button type="button" class="btn sm ghost" data-restore="${esc(b.name)}" data-when="${esc(fmtTime(b.at))}">Restore</button></li>`).join('')
+      : '<li class="faint">No backups yet: one is kept every time settings are saved.</li>';
+  } catch (e) { box.innerHTML = `<li class="err-inline">${esc(e.message)}</li>`; }
+}
+
+/** The role cards in Settings → Crew & roles. */
+function roleCardsHtml(data) {
+  const changed = id => (data.overrides || []).some(o => o.id === id);
+  return `<ul class="role-cards">${data.roles.map(r => {
+    const builtIn = !!data.defaults[r.id];
+    const tag = !builtIn ? '<span class="pill blue">Custom</span>' : changed(r.id) ? '<span class="pill amber">Changed</span>' : '';
+    return `<li class="role-card" style="--rc:${r.color}">
+      <span class="role-chip" style="--rc:${r.color}">${esc(r.short)}</span>
+      <div class="grow"><b>${esc(r.name)}</b> ${tag}<div class="faint">${r.defaultMode === 'analyze' ? 'Reads and reports' : 'Changes code on its own branch'}${r.kind === 'review' ? ' · reviews branches and pull requests' : r.kind === 'conflicts' ? ' · may run git merge in its own worktree' : ''}${r.focus ? ` · ${esc(r.focus)}` : ''}</div></div>
+      <button type="button" class="btn sm" data-role-edit="${esc(r.id)}">Edit</button>
+    </li>`;
+  }).join('')}</ul>`;
+}
+
+/** Edit one role (or add one when id is ''), in place of the cards. */
+function openRoleEditor(data, id) {
+  const r = id ? data.roles.find(x => x.id === id) : { id: '', name: '', short: '', color: '#64748b', defaultMode: 'change', focus: '', prompt: '' };
+  const def = id && data.defaults[id];
+  const changed = id && (data.overrides || []).some(o => o.id === id);
+  $('#roleCards').innerHTML = `<div class="role-editor card">
+    <div class="grid3">
+      <div class="field"><label>Id</label><input type="text" name="r_id" value="${esc(r.id)}" ${id ? 'readonly' : 'placeholder="e.g. security" pattern="[a-z][a-z0-9-]*"'}></div>
+      <div class="field"><label>Name</label><input type="text" name="r_name" maxlength="60" value="${esc(r.name)}" placeholder="e.g. Security Engineer"></div>
+      <div class="field"><label>Short tag</label><input type="text" name="r_short" maxlength="5" value="${esc(r.short)}" placeholder="SEC"></div>
+      <div class="field"><label>Colour</label><input type="color" name="r_color" value="${esc(r.color)}"></div>
+      <div class="field"><label>Usually</label><select name="r_mode"><option value="change" ${r.defaultMode === 'change' ? 'selected' : ''}>Changes code</option><option value="analyze" ${r.defaultMode === 'analyze' ? 'selected' : ''}>Reads and reports</option></select></div>
+      <div class="field"><label>Focus <span class="faint">(one line)</span></label><input type="text" name="r_focus" maxlength="200" value="${esc(r.focus || '')}"></div>
+    </div>
+    <div class="field"><label>Instructions <span class="faint">(what this specialist knows and how they work; your project's notes are added after)</span></label><textarea name="r_prompt" rows="14" maxlength="4000">${esc(r.prompt || '')}</textarea></div>
+    <div class="card-actions">
+      <button type="button" class="btn primary" data-role-save>Save role</button>
+      <button type="button" class="btn ghost" data-role-cancel>Cancel</button>
+      <span class="grow"></span>
+      ${def && changed ? `<button type="button" class="btn ghost" data-role-reset="${esc(id)}">Reset to built-in</button>` : ''}
+      ${id && !def ? `<button type="button" class="btn ghost danger" data-role-reset="${esc(id)}">Remove role</button>` : ''}
+    </div>
+  </div>`;
+  $('#roleCards').querySelector(id ? '[name=r_name]' : '[name=r_id]').focus();
 }
 
 /* ---------------- project editor (add / edit) ---------------- */
@@ -1403,6 +1582,8 @@ function projectForm(dlg, p, oldId) {
       <div class="role-fields">
         <label>Repo <select name="repo_${r.id}">${repoOpts(rc.repo || '')}</select></label>
         <label>Model <select name="model_${r.id}">${MODELS.map(([v, l]) => `<option value="${v}" ${v === (rc.model || '') ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label title="Cost limit per run for this role (USD). Blank: the project's or the app's.">$ <input type="number" class="lim-in" name="rlb_${r.id}" min="0" step="0.5" placeholder="limit" value="${(rc.limits || {}).taskBudgetUsd ?? ''}"></label>
+        <label title="Time limit per run for this role (minutes). Blank: the project's or the app's."><input type="number" class="lim-in" name="rlt_${r.id}" min="0" step="5" placeholder="min" value="${(rc.limits || {}).taskTimeoutMin ?? ''}"> min</label>
         <details ${rc.notes ? 'open' : ''}><summary>Notes for this role</summary><textarea name="notes_${r.id}" rows="2" placeholder="Standing instructions, e.g. where migrations live">${esc(rc.notes || '')}</textarea></details>
       </div>
     </div>`;
@@ -1428,6 +1609,7 @@ function projectForm(dlg, p, oldId) {
       <div class="field"><label>Knowledge graph <span class="faint">(from graphify; ${(() => { const g = Object.entries(p.graphs || {}); const have = g.filter(([, v]) => v).map(([k]) => k); return !g.length ? 'save the project first' : have.length ? `found in ${esc(have.join(', '))}` : 'no repo has a graphify-out folder yet: run graphify in it first'; })()})</span></label><select name="knowledgeGraph">
         ${[['off', 'Off'], ['summary', 'Digest in the prompt (about 1,500 extra tokens a run)'], ['tools', 'Graph tools the agent can query (graphify-mcp)']].map(([v, l]) => `<option value="${v}" ${v === (p.knowledgeGraph || 'off') ? 'selected' : ''}>${l}</option>`).join('')}
       </select><span class="hint">Measure before you keep it on: compare the same kind of task with and without it on the Costs page.</span></div>
+      <div class="field"><label>monday.com board <span class="faint">(its tickets show on the agent cards)</span></label><select name="mondayBoardId" id="mondayBoard"><option value="${esc((p.monday || {}).boardId || '')}">${(p.monday || {}).boardId ? `Board ${esc(p.monday.boardId)}` : 'None'}</option></select><span class="hint" id="mondayBoardHint">Loading your boards…</span></div>
       <div class="grid2">
         <div class="field"><label>Cost limit per run for this project <span class="faint">(USD, blank = app default)</span></label><input type="number" name="lim_budget" min="0" step="0.5" value="${lim.taskBudgetUsd ?? ''}"></div>
         <div class="field"><label>Time limit per run <span class="faint">(minutes, blank = app default)</span></label><input type="number" name="lim_time" min="0" step="5" value="${lim.taskTimeoutMin ?? ''}"></div>
@@ -1441,6 +1623,19 @@ function projectForm(dlg, p, oldId) {
   </form>`;
   if (!dlg.open) dlg.showModal();
   const form = $('#cfgForm');
+  // Fill the board picker from monday.com (when a token is set).
+  api('/api/monday/boards').then(b => {
+    const sel = $('#mondayBoard');
+    const hint = $('#mondayBoardHint');
+    if (!sel) return;
+    const cur = (p.monday || {}).boardId || '';
+    if (!b.connected) { hint.innerHTML = 'Add a monday.com token in Settings → Integrations to pick a board.'; return; }
+    if (b.error) { hint.textContent = b.error; return; }
+    const opts = [['', 'None'], ...b.boards.map(x => [x.id, `${x.name}${x.workspace ? ` · ${x.workspace}` : ''}`])];
+    if (cur && !b.boards.some(x => x.id === cur)) opts.push([cur, `Board ${cur} (not visible to this token)`]);
+    sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+    hint.textContent = `${b.boards.length} board(s) visible to your token.`;
+  }).catch(() => { const h = $('#mondayBoardHint'); if (h) h.textContent = 'Could not load boards.'; });
   dlg.onclick = async e => {
     if (e.target.closest('[data-browse-again]')) return browseFolder(dlg, '');
     const rm = e.target.closest('[data-remove-project]');
@@ -1460,10 +1655,11 @@ function projectForm(dlg, p, oldId) {
     const activeRoles = [...form.querySelectorAll('input[name=active]:checked')].map(i => i.value);
     if (!activeRoles.length) return toast('Keep at least one role', true);
     const roles = {};
-    for (const r of S.roles) roles[r.id] = { repo: F[`repo_${r.id}`].value, model: F[`model_${r.id}`].value, notes: F[`notes_${r.id}`].value, limits: ((p.roles || {})[r.id] || {}).limits };
+    for (const r of S.roles) roles[r.id] = { repo: F[`repo_${r.id}`].value, model: F[`model_${r.id}`].value, notes: F[`notes_${r.id}`].value, limits: { ...(((p.roles || {})[r.id] || {}).limits || {}), taskBudgetUsd: F[`rlb_${r.id}`].value, taskTimeoutMin: F[`rlt_${r.id}`].value } };
     const body = {
       id: F.id.value.trim(), name: F.name.value, folder: F.folder.value, stack: F.stack.value, context: F.context.value,
       activeRoles, roles, handoffs: F.handoffs.value, knowledgeGraph: F.knowledgeGraph.value, allowCommands: F.allowCommands.value,
+      mondayBoardId: F.mondayBoardId.value,
       limits: { ...(p.limits || {}), taskBudgetUsd: F.lim_budget.value, taskTimeoutMin: F.lim_time.value },
     };
     const btn = $('#cfgSave');

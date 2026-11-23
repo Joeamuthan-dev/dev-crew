@@ -791,3 +791,37 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .graph-frame { height: calc(100vh - 330px); min-height: 420px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: #0f0f1a; }
 .graph-frame iframe { width: 100%; height: 100%; border: 0; display: block; }
 .graph-frame .empty { color: #cbd5e1; }
+.role-fields .lim-in { width: 72px; }
+
+/* Settings: tabs and search, allowed-command chips, connection checks, backups, roles editor. */
+.set-nav { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.set-nav .tabs { margin: 0; }
+.set-nav input[type=search] { flex: 1; min-width: 200px; max-width: 320px; height: 34px; padding: 0 12px; border-radius: 999px; }
+#settingsForm .set-sec { display: none; }
+#settingsForm[data-active="general"]:not(.searching) .set-sec[data-tab="general"],
+#settingsForm[data-active="roles"]:not(.searching) .set-sec[data-tab="roles"],
+#settingsForm[data-active="permissions"]:not(.searching) .set-sec[data-tab="permissions"],
+#settingsForm[data-active="integrations"]:not(.searching) .set-sec[data-tab="integrations"],
+#settingsForm[data-active="appearance"]:not(.searching) .set-sec[data-tab="appearance"],
+#settingsForm[data-active="advanced"]:not(.searching) .set-sec[data-tab="advanced"],
+#settingsForm.searching .set-sec.search-hit { display: block; }
+.perm-edit { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.perm-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--fill, var(--panel-2)); }
+.perm-chip code { font-size: 12px; background: none; }
+.icon-x { border: 0; background: none; cursor: pointer; color: var(--muted); width: 20px; height: 20px; border-radius: 50%; font-size: 11px; }
+.icon-x:hover { background: var(--line); color: var(--text); }
+.perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+.checks { list-style: none; padding: 0; margin: 8px 0 12px; display: grid; gap: 10px; }
+.check-row { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; }
+.check-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex: none; background: var(--amber); }
+.check-row.ok .check-dot { background: var(--green); }
+.backups { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 4px; max-height: 280px; overflow-y: auto; }
+.backups li { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; padding: 4px 0; border-top: 1px solid var(--line); }
+.file-btn { cursor: pointer; }
+.role-cards { list-style: none; padding: 0; margin: 8px 0 12px; display: grid; gap: 8px; }
+.role-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); border-left: 3px solid var(--rc); }
+.role-card .grow { flex: 1; min-width: 0; font-size: 13px; }
+.role-editor { padding: 14px 16px; margin-bottom: 12px; display: grid; gap: 10px; }
+.role-editor textarea { font: 12.5px/1.5 var(--mono); }
+.role-editor .card-actions .grow { flex: 1; }
+.role-editor input[type=color] { height: 34px; padding: 2px; width: 100%; }

@@ -1,15 +1,15 @@
 // Dev Crew server: a queue of agent runs, a daily stand-up scheduler, a small JSON API and
 // a live event stream for the dashboard. Listens on 127.0.0.1 only: these agents edit code.
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig, refreshRepos } from './lib/config.mjs';
-import { ROLES, roleById, roleKind } from './lib/roles.mjs';
+import { ROLES, roleById, roleKind, BUILT_IN_ROLES } from './lib/roles.mjs';
 import { parseReview, reviewMarkdown, postReview } from './lib/review.mjs';
 import * as G from './lib/git.mjs';
 import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
-import { settingsFromForm, maskSettings } from './lib/settings.mjs';
+import { settingsFromForm, maskSettings, PERMISSION_MODES } from './lib/settings.mjs';
 import { collectRuns, summarize, runsCsv, filterRows, dayKey, trialJobs } from './lib/analytics.mjs';
 import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseReport, summaryOf } from './lib/prompts.mjs';
 import { createStore, newId } from './lib/store.mjs';
@@ -31,6 +31,7 @@ const TMP = path.join(DATA, 'tmp');
 const PUBLIC = path.join(ROOT, 'public');
 
 let cfg = loadConfig();
+const LISTEN_PORT = cfg.settings.port; // fixed for the life of the process
 const store = createStore(DATA);
 clearTmp(TMP); // system-prompt files left by runs that were interrupted
 const monday = createMonday(() => cfg);
@@ -446,7 +447,7 @@ async function execTask(t, handle) {
       }),
       mode: t.mode,
       kind,
-      extraCommands: p.allowCommands,
+      extraCommands: [...(cfg.settings.allowCommands || []), ...(p.allowCommands || [])],
       model,
       resume,
       addDirs,
@@ -716,6 +717,7 @@ const publicProject = p => ({
   handoffs: policyFor(p),
   activeRoles: p.activeRoles,
   allowCommands: p.allowCommands,
+  mondayBoardId: p.monday ? String(p.monday.boardId || '') : '',
   knowledgeGraph: p.knowledgeGraph,
   graphUpdate: p.graphUpdate,
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
@@ -1329,6 +1331,8 @@ async function route(req, res, url) {
         limits: cfg.settings.limits, handoffs: cfg.settings.handoffs, dailyReport: cfg.settings.dailyReport,
         housekeeping: cfg.settings.housekeeping, ui: cfg.settings.ui, claudeCommand: cfg.settings.claudeCommand,
         inheritClaudeEnv: cfg.settings.inheritClaudeEnv, workspacePath: cfg.settings.workspacePath, port: cfg.settings.port,
+        workspace: cfg.settings.workspace, permissionMode: cfg.settings.permissionMode || '', permissionModes: PERMISSION_MODES,
+        strictMcp: !!cfg.settings.strictMcp, allowCommands: cfg.settings.allowCommands || [],
         configFile: path.basename(cfg.file),
       },
       mondayTokenFromEnv: !!process.env.MONDAY_API_TOKEN,
@@ -1351,7 +1355,113 @@ async function route(req, res, url) {
     if (cfg.settings.claudeCommand !== before) resetClaude();
     pump(); // a higher "agents at a time" or daily limit can start waiting work now
     emit('reload', {});
-    return send(res, 200, { ok: true, restartNeeded: false });
+    // a new port takes effect after a restart; everything else applies straight away
+    return send(res, 200, { ok: true, restartNeeded: cfg.settings.port !== LISTEN_PORT, port: cfg.settings.port });
+  }
+
+  /* ----- Settings: roles editor ----- */
+  // GET /api/roles: every role with its instructions, and the built-in defaults for "Reset".
+  if (m === 'GET' && url.pathname === '/api/roles') {
+    return send(res, 200, { roles: ROLES, defaults: Object.fromEntries(BUILT_IN_ROLES.map(r => [r.id, r])), overrides: readRaw().roles || [] });
+  }
+  // PUT /api/roles/:id: save a role (only what differs from the built-in one is stored).
+  // DELETE /api/roles/:id: reset a built-in role to its default, or remove a custom role.
+  if (parts[1] === 'roles' && parts[2] && (m === 'PUT' || m === 'DELETE')) {
+    const id = parts[2];
+    const raw = readRaw();
+    const list = Array.isArray(raw.roles) ? raw.roles.filter(r => r && r.id !== id) : [];
+    const def = BUILT_IN_ROLES.find(r => r.id === id);
+    if (m === 'DELETE') {
+      if (!def && S.tasks.some(t => t.role === id && ['queued', 'running'].includes(t.status))) return send(res, 409, { error: 'This role has work queued or running. Wait for it to finish first.' });
+      writeRaw({ ...raw, roles: list });
+    } else {
+      const b = await readBody(req);
+      const fields = {};
+      for (const k of ['name', 'short', 'color', 'defaultMode', 'focus', 'prompt']) if (b[k] !== undefined) fields[k] = typeof b[k] === 'string' ? b[k].trim() : b[k];
+      if (!def && (!/^[a-z][a-z0-9-]{0,30}$/.test(id) || id === 'stand-up')) return send(res, 400, { error: 'A role id is lower-case letters, digits and dashes, starting with a letter.' });
+      const entry = { id };
+      for (const [k, v] of Object.entries(fields)) if (!def || v !== def[k]) entry[k] = v;
+      if (Object.keys(entry).length > 1 || !def) list.push(entry);
+      writeRaw({ ...raw, roles: list });
+    }
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, roles: ROLES });
+  }
+
+  /* ----- Settings: integrations ----- */
+  // GET /api/checks: is each tool Dev Crew uses installed, signed in and working?
+  if (m === 'GET' && url.pathname === '/api/checks') {
+    const run = (cmd, args) => new Promise(resolve => execFile(cmd, args, { timeout: 20000, windowsHide: true }, (err, out, errOut) => resolve({ ok: !err, out: String(out || errOut || (err && err.message) || '').trim() })));
+    const gh = fs.existsSync(path.join(process.env.LOCALAPPDATA || '', 'Programs', 'gh', 'bin', 'gh.exe')) ? path.join(process.env.LOCALAPPDATA, 'Programs', 'gh', 'bin', 'gh.exe') : 'gh';
+    resetClaude();
+    const [claude, git, ghVer, ghAuth, graph, graphMcp] = await Promise.all([
+      claudeFeatures(cfg.settings.claudeCommand),
+      run('git', ['--version']),
+      run(gh, ['--version']),
+      run(gh, ['auth', 'status']),
+      run(graphifyCommand(), ['--help']),
+      new Promise(resolve => { const p = path.join(process.env.USERPROFILE || process.env.HOME || '', '.local', 'bin', process.platform === 'win32' ? 'graphify-mcp.exe' : 'graphify-mcp'); resolve({ ok: fs.existsSync(p) }); }),
+    ]);
+    let mondayCheck;
+    try { mondayCheck = await monday.check(); } catch (e) { mondayCheck = { ok: false, error: e.message }; }
+    const line = s => s.split('\n')[0].slice(0, 160);
+    const ghUser = /accounts+(S+)/i.exec(ghAuth.out) || /ass+(S+)/i.exec(ghAuth.out);
+    return send(res, 200, { checks: [
+      { id: 'claude', name: 'Claude Code', ok: claude.found, detail: claude.found ? `${claude.version}${claude.maxBudget ? '' : ' · no --max-budget-usd: update with claude update'}` : 'Not found. Install Claude Code and run claude once to sign in.', needed: 'Runs every agent.' },
+      { id: 'git', name: 'Git', ok: git.ok, detail: git.ok ? line(git.out) : 'Not found on PATH.', needed: 'Worktrees and branches.' },
+      { id: 'gh', name: 'GitHub CLI', ok: ghVer.ok && ghAuth.ok, detail: !ghVer.ok ? 'Not installed (only needed to post reviews on pull requests).' : ghAuth.ok ? `Signed in${ghUser ? ` as ${ghUser[1]}` : ''}` : 'Installed but not signed in: run gh auth login.', needed: 'Posting Code Reviewer findings on pull requests.' },
+      { id: 'monday', name: 'monday.com', ok: mondayCheck.ok, detail: mondayCheck.ok ? `Connected as ${mondayCheck.detail}` : (mondayCheck.error === 'No token set.' ? 'No token: demo tickets are shown. Add a token below.' : mondayCheck.error), needed: 'Tickets on agent cards, assigning and updating tickets.' },
+      { id: 'graphify', name: 'graphify', ok: graph.ok, detail: graph.ok ? `Installed${graphMcp.ok ? ', with graph tools (graphify-mcp)' : ''}` : 'Not installed where Dev Crew runs: uv tool install "graphifyy[mcp]" --python 3.12', needed: 'The Graph tab and the knowledge-graph option.' },
+    ] });
+  }
+  // GET /api/monday/boards: the boards the token can see (the board picker in Edit project).
+  if (m === 'GET' && url.pathname === '/api/monday/boards') {
+    try { return send(res, 200, { connected: monday.connected(), boards: await monday.listBoards() }); }
+    catch (e) { return send(res, 200, { connected: monday.connected(), boards: [], error: e.message }); }
+  }
+
+  /* ----- Settings: backups, export and import ----- */
+  const BACKUP_DIR = path.join(DATA, 'config-backups');
+  if (m === 'GET' && url.pathname === '/api/config/backups') {
+    const list = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter(f => /^crew\.config\.local\..*\.json$/.test(f)).sort().reverse() : [];
+    return send(res, 200, { backups: list.slice(0, 20).map(f => {
+      const full = path.join(BACKUP_DIR, f);
+      let projects = 0;
+      try { projects = (JSON.parse(fs.readFileSync(full, 'utf8')).projects || []).length; } catch { /* unreadable */ }
+      return { name: f, at: fs.statSync(full).mtimeMs, size: fs.statSync(full).size, projects };
+    }) });
+  }
+  if (m === 'POST' && url.pathname === '/api/config/restore') {
+    const { name } = await readBody(req);
+    if (!/^crew\.config\.local\.[\w.-]+\.json$/.test(String(name || ''))) return send(res, 400, { error: 'Unknown backup.' });
+    const file = path.join(BACKUP_DIR, name);
+    if (!fs.existsSync(file)) return send(res, 404, { error: 'That backup is gone.' });
+    writeRaw(JSON.parse(fs.readFileSync(file, 'utf8'))); // validates, and backs up the current file first
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true });
+  }
+  // GET /api/config/export: the whole setup as a file, without the monday.com token.
+  if (m === 'GET' && url.pathname === '/api/config/export') {
+    const raw = readRaw();
+    if (raw.settings && raw.settings.monday) raw.settings.monday = { ...raw.settings.monday, token: '' };
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-disposition': `attachment; filename="dev-crew-config-${dayKey(Date.now())}.json"`, 'cache-control': 'no-store' });
+    return res.end(JSON.stringify(raw, null, 2) + '\n');
+  }
+  // POST /api/config/import {config}: replace the setup with an exported one (the current file is
+  // backed up first; this machine's monday.com token is kept when the file has none).
+  if (m === 'POST' && url.pathname === '/api/config/import') {
+    const { config } = await readBody(req);
+    if (!config || typeof config !== 'object' || !Array.isArray(config.projects)) return send(res, 400, { error: 'This is not a Dev Crew config file (it has no "projects" list).' });
+    const cur = readRaw();
+    const next = JSON.parse(JSON.stringify(config));
+    const tok = cur.settings && cur.settings.monday && cur.settings.monday.token;
+    if (tok && !(next.settings && next.settings.monday && next.settings.monday.token)) next.settings = { ...(next.settings || {}), monday: { ...((next.settings || {}).monday || {}), token: tok } };
+    writeRaw(next);
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, projects: cfg.projects.length });
   }
 
   if (m === 'GET' && url.pathname === '/api/people') return send(res, 200, { people: readRaw().people || [] });
@@ -1369,7 +1479,8 @@ async function route(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: cfg.settings.port });
+  // the port this process listens on: a new port saved in Settings only applies after a restart
+  const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: LISTEN_PORT });
   if (refused) return send(res, refused.code, { error: refused.error });
   try {
     if (url.pathname.startsWith('/api/')) return await route(req, res, url);
@@ -1393,9 +1504,9 @@ const shutdown = () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-server.listen(cfg.settings.port, '127.0.0.1', async () => {
+server.listen(LISTEN_PORT, '127.0.0.1', async () => {
   const f = await claudeFeatures(cfg.settings.claudeCommand);
-  console.log(`\nDev Crew → http://localhost:${cfg.settings.port}`);
+  console.log(`\nDev Crew → http://localhost:${LISTEN_PORT}`);
   console.log(`  config:    ${cfg.file}`);
   console.log(`  workspace: ${cfg.settings.workspacePath}`);
   for (const p of cfg.projects) {
