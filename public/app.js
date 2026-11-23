@@ -1357,6 +1357,9 @@ async function renderSettings(main) {
           <div class="field"><label>Warn at (%)</label><input type="number" name="warnAtPercent" min="50" max="95" step="5" value="${Math.round(l.warnAt * 100)}"></div>
         </div>`)}
       ${sec('general', 'Alerts', alertSettingsHtml())}
+      ${sec('general', 'Workflow', (() => { const w = e.workflow || {}; const ar = w.autoReview === undefined ? true : !!w.autoReview; const fr = w.fixRounds === undefined ? 1 : Number(w.fixRounds); return `<p class="hint">What happens after an agent finishes a change, so you only open branches that build, pass the checks and have been reviewed.</p>
+        <label class="check"><input type="checkbox" name="wfAutoReview" ${ar ? 'checked' : ''}> Review every finished branch automatically (projects with a Code Reviewer)</label>
+        <div class="field" style="max-width:420px"><label>When the project's checks fail on a branch</label><select name="wfFixRounds">${[[0, 'Tell me (no automatic fix-up)'], [1, 'Send it back to the agent once, with the errors'], [2, 'Send it back up to twice'], [3, 'Send it back up to 3 times']].map(([v, l]) => `<option value="${v}" ${v === fr ? 'selected' : ''}>${l}</option>`).join('')}</select><span class="hint">Each round is another run of that task, within its cost limit.</span></div>`; })())}
       ${sec('general', 'Handoffs', `<p class="hint">When a finished task says another role should act next. Projects can override this.</p>
         ${seg('handoffs', e.handoffs, [['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']])}`)}
       ${sec('general', 'Daily stand-up', `<div class="grid3">
@@ -1524,6 +1527,7 @@ async function renderSettings(main) {
       model: F.model.value, reportModel: F.reportModel.value, maxConcurrent: F.maxConcurrent.value,
       limits: { taskBudgetUsd: F.taskBudgetUsd.value, taskTimeoutMin: F.taskTimeoutMin.value, dailyBudgetUsd: F.dailyBudgetUsd.value, warnAtPercent: F.warnAtPercent.value },
       handoffs: radio('handoffs'),
+      workflow: { autoReview: F.wfAutoReview.checked, fixRounds: F.wfFixRounds.value },
       dailyReport: { enabled: F.drEnabled.checked, at: F.drAt.value, weekdaysOnly: F.drWeekdays.checked },
       housekeeping: { worktreeDays: F.worktreeDays.value, taskDays: F.taskDays.value, auto: F.hkAuto.checked },
       ui: { theme: radio('theme'), motion: radio('motion'), quality: radio('quality'), officeView: radio('officeView') },
@@ -2052,6 +2056,7 @@ function projectForm(dlg, p, oldId) {
         <div class="field"><label>Handoffs</label><select name="handoffs">
           ${[['', `App default (${esc(S.settings.handoffs || 'ask')})`], ['ask', 'Ask me first'], ['auto', 'Start automatically'], ['off', 'Off']].map(([v, l]) => `<option value="${v}" ${v === (p.handoffs || '') ? 'selected' : ''}>${l}</option>`).join('')}
         </select></div>
+        <div class="field"><label>Default base branch <span class="faint">(blank: the repo's default, usually main)</span></label><input type="text" name="baseBranch" maxlength="120" spellcheck="false" placeholder="main" value="${esc(p.baseBranch || '')}"></div>
         <div class="field"><label>Extra allowed commands <span class="faint">(one per line)</span></label><textarea name="allowCommands" rows="2" placeholder="npm run e2e">${esc((p.allowCommands || []).join('\n'))}</textarea></div>
       </div>
       <div class="field"><label>Knowledge graph <span class="faint">(from graphify; ${(() => { const g = Object.entries(p.graphs || {}); const have = g.filter(([, v]) => v).map(([k]) => k); return !g.length ? 'save the project first' : have.length ? `found in ${esc(have.join(', '))}` : 'no repo has a graphify-out folder yet: run graphify in it first'; })()})</span></label><select name="knowledgeGraph">
@@ -2110,6 +2115,7 @@ function projectForm(dlg, p, oldId) {
       id: F.id.value.trim(), name: F.name.value, folder: F.folder.value, stack: F.stack.value, context: F.context.value,
       activeRoles, roles, handoffs: F.handoffs.value, knowledgeGraph: F.knowledgeGraph.value, allowCommands: F.allowCommands.value,
       mondayBoardId: F.mondayBoardId.value,
+      baseBranch: F.baseBranch.value,
       quality: {
         commands: Object.fromEntries(Q_CHECKS.map(([k]) => [k, F[`q_${k}`].value])),
         rules: F.q_rules.value, requireTests: F.q_requireTests.checked, noNewWarnings: F.q_noNewWarnings.checked, verify: F.q_verify.checked,
@@ -2280,7 +2286,7 @@ function refreshDrawer(first) {
         ${g.commits.length ? `<div class="commits">${esc(g.commits.join('\n'))}</div>` : ''}
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
-    ${checksHtml(t)}${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
+    ${workflowHtml(t)}${checksHtml(t)}${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
     ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
     ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.review && t.review.result ? t.result.replace(/\n##\s*Review\s*\n[\s\S]*$/i, '') : t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
@@ -2355,6 +2361,15 @@ function noChangesHtml(t) {
 
 const VERDICTS = { approve: ['Looks good', 'ok'], comment: ['Comments', 'info'], request_changes: ['Changes requested', 'bad'] };
 const SEV_ICON = { critical: '⛔', major: '▲', minor: '●', nit: '·' };
+
+/** Automatic fix-ups and the automatic review, on a change task. */
+function workflowHtml(t) {
+  const rv = t.autoReviewId && taskOf(t.autoReviewId);
+  const lines = [];
+  if (t.fixups) lines.push(`Checks failed, so Dev Crew sent it back with the errors ${t.fixups === 1 ? 'once' : `${t.fixups} times`}.`);
+  if (rv) lines.push(`Sent to the Code Reviewer automatically: <button class="linkish" data-task="${rv.id}">${esc(rv.title)}</button> ${statusPill(rv)}${rv.review && rv.review.result ? ` <span class="verdict ${(VERDICTS[rv.review.result.verdict] || VERDICTS.comment)[1]}">${(VERDICTS[rv.review.result.verdict] || VERDICTS.comment)[0]}</span>` : ''}`);
+  return lines.length ? `<div class="d-section"><h4>Workflow</h4>${lines.map(l => `<p>${l}</p>`).join('')}</div>` : '';
+}
 
 /** The project's checks, run by Dev Crew on this task's branch. */
 function checksHtml(t) {
@@ -2643,7 +2658,7 @@ function openAssign(pre = {}) {
     if (!repo || repo === '*') return;
     try {
       const b = await api(`/api/branches?project=${encodeURIComponent(p.id)}&repo=${encodeURIComponent(repo)}`);
-      F.base.innerHTML = b.branches.filter(x => !x.startsWith('agent/')).map(x => `<option value="${esc(x)}" ${x === b.current ? 'selected' : ''}>${esc(x)}${x === b.current ? ' (checked out)' : ''}</option>`).join('')
+      F.base.innerHTML = [...(b.default && !b.branches.includes(b.default) ? [b.default] : []), ...b.branches.filter(x => !x.startsWith('agent/'))].map(x => `<option value="${esc(x)}" ${x === (b.default || b.current) ? 'selected' : ''}>${esc(x)}${x === b.default ? ' (default)' : ''}${x === b.current ? ' (checked out)' : ''}</option>`).join('')
         || '<option value="">Current branch</option>';
       // Reviews and merges also pick from the crew's own branches and the remote ones.
       $('#branchList').innerHTML = [...b.branches, ...(b.remote || [])].map(x => `<option value="${esc(x)}">`).join('');

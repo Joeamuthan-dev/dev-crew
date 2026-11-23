@@ -40,6 +40,16 @@ export function detectAlerts(prev, t, { roleName = id => id, projectName = id =>
       out.push({ ...base, key: `${t.id}:handoff:${h.id}`, event: 'handoff', title: `${who} suggests a handoff`,
         body: `${roleName(h.role)}: ${clip(h.title, 90)}${h.reason ? ` · ${clip(h.reason, 90)}` : ''}${handoffs.length > 1 ? ` (+${handoffs.length - 1} more)` : ''}`,
         actions: [{ id: 'handoff', label: 'Start handoff', kind: 'api', method: 'POST', path: `/api/tasks/${t.id}/handoffs/${h.id}/start`, doneText: 'Handoff started', doneBody: `The ${roleName(h.role)} is on it.` }, open] });
+    } else if (t.review && t.review.result) {
+      const rv = t.review.result;
+      const serious = (rv.findings || []).filter(f => f.severity === 'critical' || f.severity === 'major').length;
+      const word = { approve: 'Approved', request_changes: 'Changes requested', comment: 'Reviewed' }[rv.verdict] || 'Reviewed';
+      const target = t.prevId || t.id;
+      out.push({ ...base, key: `${t.id}:reviewed`, event: 'review', title: `${word}: ${clip(String(t.title).replace(/^Review: /, ''), 80)}`,
+        body: `${who} on ${where} · ${(rv.findings || []).length} finding${(rv.findings || []).length === 1 ? '' : 's'}${serious ? ` (${serious} serious)` : ''}${rv.summary ? ` · ${clip(rv.summary, 120)}` : ''}`,
+        actions: [{ ...open, label: 'See review' }, ...(target !== t.id ? [{ id: 'branch', label: 'Open branch', kind: 'open', url: `#/t/${target}` }] : [])] });
+    } else if (t.mode === 'change' && t.autoReviewId) {
+      // its review is on the way; that review's result is the alert
     } else if (t.noChanges) {
       out.push({ ...base, key: `${t.id}:nochanges`, event: 'failed', title: `No changes: ${clip(t.title, 80)}`, body: `${who} on ${where} finished without a commit. ${clip(t.summary, 140)}`, actions: [open] });
     } else if (t.mode === 'change' && (t.checks || []).some(c => !c.ok && !c.skipped && !c.preexisting)) {
