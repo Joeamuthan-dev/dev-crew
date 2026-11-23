@@ -2,13 +2,59 @@
 
 Multiple AI agents: a developer crew for each of your projects.
 
-A crew of six AI engineers for each of your projects: **Solutions Architect, Frontend, Backend,
-Database, QA / Test, and DevOps & Cloud**. Assign them tasks each day, and each morning get a
-stand-up per project: what got done, what's blocked, the risks, and suggested tasks you can
-assign in one click.
+A crew of senior AI engineers for each of your projects: **Solutions Architect, Frontend,
+Backend, Database, QA / Test, DevOps & Cloud, Code Reviewer and Conflict Fixer**. Assign them
+tasks each day, and each morning get a stand-up per project: what got done, what's blocked, the
+risks, and suggested tasks you can assign in one click.
 
 Every agent is a headless [Claude Code](https://claude.com/claude-code) session running on your
 machine with your own Claude login. Nothing is hosted anywhere.
+
+## What it can do
+
+**A crew that works like a team**
+- **Senior specialist roles.** Each role works like an engineer with ten years in that field, with
+  its own standards and focus. You can edit roles, add your own, and pick which ones each project
+  uses.
+- **Plans with parallel steps.** The Architect splits a feature into linked tasks. Steps that don't
+  depend on each other run at the same time, each on its own branch. The Conflict Fixer then merges
+  those branches, so you review one branch.
+- **Handoffs.** When a finished task needs another role next (tests for new code, say, or a schema
+  change), Dev Crew proposes it, or starts it automatically if you allow that.
+- **Daily stand-ups** per project: health, what's done and blocked, risks, decisions for you, and
+  suggested tasks for tomorrow.
+
+**Quality you can trust**
+- **Quality profile per project.** Set your build, lint, format and test commands (suggested for
+  your stack) and your conventions. Agents run them, and then **Dev Crew runs them itself** on every
+  branch, so the agent's word is never the only proof.
+- **A strict Code Reviewer.** It checks your conventions and the usual rules for your stack. It
+  traces the callers of changed code and reads the tests. It won't approve with a failed check or
+  checklist item. It can post its review on the GitHub pull request.
+- **Lessons from past runs.** Dev Crew remembers what it learned about each repo: build quirks,
+  refused commands, failed checks, and what reviewers keep flagging. It gives the top lessons to
+  every later run. You can pin, mute or add your own.
+- **Honest results.** A change task that made no commits is flagged, not shown as done. So are
+  refused commands, and plan steps for a repo that isn't in the project.
+
+**Stay in control without watching**
+- **Windows notifications** at the bottom right of the screen, even with the browser minimised or
+  closed. Their buttons let you review a branch or start a plan or handoff with one click.
+- **Limits:** a cost and a time limit per run, a daily spend cap, and cost estimates before a run.
+  The Costs page shows where the money went.
+- **Settings from the dashboard:** roles, permissions (with one-click "allow this refused
+  command"), per-role limits, integrations, alerts, export and import of the config, and
+  connection checks.
+
+**Connected to your tools**
+- **Knowledge graph** of each repo (from graphify), shown in a Graph tab and given to agents as a
+  digest or as tools they can query. It is kept current after new commits or weekly.
+- **Integrations:** add MCP servers (GitHub, Jira, databases, and others) per project and role, plus
+  Slack, Teams or JSON webhooks for notifications.
+- **monday.com tickets** on the agent cards; **GitHub** pull request reviews through `gh`.
+
+**A 3D office** with a desk per agent, live status, light and dark themes, and a liquid-glass look.
+The side menu collapses for a full-width view.
 
 ## How it keeps your repos safe
 
@@ -87,7 +133,7 @@ Everything is saved to **`crew.config.local.json`** (yours; it wins over the shi
 | `roles.<role>.notes` | Standing instructions for that role on that project. |
 | `roles.<role>.model` | `sonnet`, `opus` or `haiku` for that role (a task can still override it). |
 | `allowCommands` | Extra command prefixes the agents may run in that project. |
-| `activeRoles` | The roles the project uses (default: all six). The others get no desk, are left out of the dialogs, and agents are told the project has no such role, so they never hand work to it. |
+| `activeRoles` | The roles the project uses (default: all of them). The others get no desk, are left out of the dialogs, and agents are told the project has no such role, so they never hand work to it. |
 | `handoffs`, `limits` | Per-project overrides of the app settings (see *Handoffs and plans* and *Estimates and limits*). |
 
 Role ids: `architect`, `frontend`, `backend`, `database`, `qa`, `devops`.
