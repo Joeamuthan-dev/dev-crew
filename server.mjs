@@ -1075,6 +1075,9 @@ async function createTask(b) {
   let details = String(b.details || '').slice(0, 8000);
   let ticket = null;
   if (b.ticketId) {
+    // Sample tickets (monday.com not connected) describe work that is not in your repos: an agent
+    // would only report that there is nothing to do, and the run would still cost money.
+    if (monday.isDemo(p.id)) throw new Error('That is a sample ticket: monday.com is not connected, so the board shows made-up work that is not in your repo. Assign your own task instead, or connect monday.com in Settings → Integrations.');
     const d = await monday.details(p.id, b.ticketId);
     ticket = { itemId: d.id, name: d.name, url: d.url, status: d.status };
     const cols = Object.entries(d.columns || {}).map(([k, v]) => `- ${k}: ${v}`).join('\n');
