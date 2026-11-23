@@ -401,6 +401,12 @@ function render() {
     if (!page || page.dataset.pid !== r.id) { main.innerHTML = projectView(projOf(r.id), 'graph'); loadGraph(r.id); }
     return;
   }
+  // Drawn once per visit (so a half-typed lesson survives live updates).
+  if (r.view === 'project' && projOf(r.id) && r.tab === 'lessons') {
+    const page = $('#lessonsPage');
+    if (!page || page.dataset.pid !== r.id) { main.innerHTML = projectView(projOf(r.id), 'lessons'); loadLessons(r.id); }
+    return;
+  }
   if (r.view === 'project' && projOf(r.id)) main.innerHTML = projectView(projOf(r.id), r.tab);
   else if (r.view === 'office') main.innerHTML = office2dView();
   else main.innerHTML = todayView();
@@ -839,6 +845,38 @@ function taskRow(t, showProject) {
   </div>`;
 }
 
+/* ---------------- Quality profile (Edit project) ---------------- */
+
+const Q_CHECKS = [['build', 'Build', 'dotnet build'], ['lint', 'Lint', 'npx eslint .'], ['format', 'Format check', 'dotnet format --verify-no-changes'], ['test', 'Tests', 'dotnet test']];
+
+function qualityFields(p) {
+  const q = p.quality || {};
+  const c = q.commands || {};
+  return `<fieldset class="field quality-box"><legend>Quality profile <span class="faint">(what "done" means here: agents run these commands, the Code Reviewer checks against these rules)</span></legend>
+    <div class="grid2">${Q_CHECKS.map(([k, l, ph]) => `<label class="q-cmd">${l}<input type="text" name="q_${k}" maxlength="300" spellcheck="false" value="${esc(c[k] || '')}" placeholder="${esc(ph)}"></label>`).join('')}</div>
+    <div class="card-actions" style="margin:4px 0 8px"><button type="button" class="btn sm ghost" data-q-suggest>Suggest from the repos</button><span class="hint" id="qHint">Leave a command blank to skip it. They run in the task's worktree, from the repo root.</span></div>
+    <label>Conventions the reviewer checks <span class="faint">(one per line)</span><textarea name="q_rules" rows="3" placeholder="Controllers stay thin: logic goes in services&#10;Errors return ProblemDetails&#10;No raw SQL outside the repositories">${esc((q.rules || []).join('\n'))}</textarea></label>
+    <label class="check"><input type="checkbox" name="q_requireTests" ${q.requireTests ? 'checked' : ''}> New public methods, endpoints and components need tests</label>
+    <label class="check"><input type="checkbox" name="q_noNewWarnings" ${q.noNewWarnings ? 'checked' : ''}> No new compiler or linter warnings</label>
+    <label class="check"><input type="checkbox" name="q_verify" ${q.verify === false ? '' : 'checked'}> Dev Crew runs the checks itself on every branch: results show on the task, and a failing check blocks the reviewer's approval</label>
+  </fieldset>`;
+}
+
+async function suggestQuality(form, pid) {
+  const hint = $('#qHint');
+  if (!pid) { hint.textContent = 'Save the project first, then Dev Crew can look at its repos.'; return; }
+  hint.textContent = 'Looking at the repos…';
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(pid)}/quality/suggest`);
+    const filled = [];
+    for (const [k, l] of Q_CHECKS) {
+      const box = form.elements[`q_${k}`];
+      if (!box.value.trim() && r.commands[k]) { box.value = r.commands[k]; filled.push(l); }
+    }
+    hint.textContent = filled.length ? `Filled in ${filled.join(', ')} for ${r.stack.slice(0, 3).join(', ') || 'this stack'}. Check them, then Save.` : Object.keys(r.commands).length ? 'Nothing to add: the boxes with a suggestion are already filled.' : 'No suggestion for this stack; type the commands you use.';
+  } catch (e) { hint.textContent = e.message; }
+}
+
 /* ---------------- Project ---------------- */
 
 /* The Graph tab: graphify's interactive map of a repo, how fresh it is, and keeping it current. */
@@ -893,9 +931,71 @@ async function loadGraph(pid, { reloadView = false } = {}) {
 
 
 
+/* The Lessons tab: what earlier runs learned about each repo, given to every later run there. */
+function lessonsTab(p) {
+  const repos = p.repos.map(r => r.name);
+  return `<div id="lessonsPage" data-pid="${esc(p.id)}">
+    <div class="card">
+      <p class="hint">Dev Crew keeps short lessons about each repo: what agents report they learned (how it builds, quirks, conventions), commands that were refused, checks that failed, and problems reviewers flagged. The top ones go into every later run in that repo. Pin the ones that matter, mute or delete wrong ones, or add your own (yours are pinned).</p>
+      <form id="lessonAdd" class="lesson-add">
+        ${repos.length > 1 ? `<select name="repo" aria-label="Repo">${repos.map(r => `<option>${esc(r)}</option>`).join('')}</select>` : `<input type="hidden" name="repo" value="${esc(repos[0] || '*')}">`}
+        <input type="text" name="text" maxlength="240" required minlength="12" placeholder="e.g. Run dotnet test from the solution folder; the Api project has no tests of its own">
+        <button class="btn sm primary">Add lesson</button>
+      </form>
+    </div>
+    <div id="lessonsList"><div class="empty">Loading…</div></div>
+  </div>`;
+}
+
+const LESSON_SOURCE = { agent: 'an agent', owner: 'you', refused: 'a refused command', checks: 'failed checks', review: 'a review' };
+function renderLessons(view) {
+  const el = $('#lessonsList');
+  if (!el) return;
+  const any = view.repos.some(r => r.lessons.length);
+  el.innerHTML = !any ? '<div class="empty">No lessons yet. They appear as the crew works; you can add your own above.</div>'
+    : view.repos.filter(r => r.lessons.length).map(r => `<div class="card"><h3>${esc(r.repo === '*' ? 'Whole project' : r.repo)} <span class="faint">· ${r.lessons.length}</span></h3>
+      <ul class="lessons">${r.lessons.map((l, i) => `<li class="${l.muted ? 'muted' : ''} ${i < 12 && !l.muted ? 'in-prompt' : ''}">
+        <div class="lesson-text">${l.pinned ? '<span title="Pinned" aria-label="Pinned">📌</span> ' : ''}${esc(l.text)}</div>
+        <div class="lesson-meta faint">From ${esc(LESSON_SOURCE[l.source] || l.source)} · ${(l.hits || 1) > 1 ? `seen ${l.hits} times · ` : ''}${ago(l.at)}${l.muted ? ' · muted: not given to agents' : i < 12 ? ' · given to agents' : ''}</div>
+        <div class="lesson-act">
+          <button class="btn sm ghost" data-lesson="${l.id}" data-do="pin">${l.pinned ? 'Unpin' : 'Pin'}</button>
+          <button class="btn sm ghost" data-lesson="${l.id}" data-do="mute">${l.muted ? 'Unmute' : 'Mute'}</button>
+          <button class="btn sm ghost danger" data-lesson="${l.id}" data-do="del">Delete</button>
+        </div></li>`).join('')}</ul></div>`).join('');
+}
+
+async function loadLessons(pid) {
+  try { renderLessons(await api(`/api/projects/${encodeURIComponent(pid)}/lessons`)); }
+  catch (e) { const el = $('#lessonsList'); if (el) el.innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
+}
+
+document.addEventListener('submit', async e => {
+  if (e.target.id !== 'lessonAdd') return;
+  e.preventDefault();
+  const pid = $('#lessonsPage').dataset.pid;
+  const F = e.target.elements;
+  try {
+    renderLessons(await api(`/api/projects/${encodeURIComponent(pid)}/lessons`, { method: 'POST', body: { repo: F.repo.value, text: F.text.value } }));
+    F.text.value = '';
+    toast('Lesson added and pinned');
+  } catch (err) { toast(err.message, true); }
+});
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-lesson]');
+  if (!b || !$('#lessonsPage')) return;
+  const pid = $('#lessonsPage').dataset.pid;
+  const url = `/api/projects/${encodeURIComponent(pid)}/lessons/${encodeURIComponent(b.dataset.lesson)}`;
+  const li = b.closest('li');
+  try {
+    if (b.dataset.do === 'del') { if (!confirm('Delete this lesson? Agents stop getting it.')) return; renderLessons(await api(url, { method: 'DELETE' })); }
+    else if (b.dataset.do === 'pin') renderLessons(await api(url, { method: 'PATCH', body: { pinned: !li.querySelector('[aria-label=Pinned]') } }));
+    else if (b.dataset.do === 'mute') renderLessons(await api(url, { method: 'PATCH', body: { muted: !li.classList.contains('muted') } }));
+  } catch (err) { toast(err.message, true); }
+});
+
 function projectView(p, tab) {
-  const tabs = [['crew', 'Crew'], ['tasks', 'Tasks'], ['standups', 'Stand-ups'], ['graph', 'Graph']];
-  const body = tab === 'tasks' ? tasksTab(p) : tab === 'standups' ? standupsTab(p) : tab === 'graph' ? graphTab(p) : crewTab(p);
+  const tabs = [['crew', 'Crew'], ['tasks', 'Tasks'], ['standups', 'Stand-ups'], ['graph', 'Graph'], ['lessons', `Lessons${p.lessonCount ? ` (${p.lessonCount})` : ''}`]];
+  const body = tab === 'tasks' ? tasksTab(p) : tab === 'standups' ? standupsTab(p) : tab === 'graph' ? graphTab(p) : tab === 'lessons' ? lessonsTab(p) : crewTab(p);
   return `
     <div class="page-head">
       <div>
@@ -1954,6 +2054,7 @@ function projectForm(dlg, p, oldId) {
       <div class="field"><label>Knowledge graph <span class="faint">(from graphify; ${(() => { const g = Object.entries(p.graphs || {}); const have = g.filter(([, v]) => v).map(([k]) => k); return !g.length ? 'save the project first' : have.length ? `found in ${esc(have.join(', '))}` : 'no repo has a graphify-out folder yet: run graphify in it first'; })()})</span></label><select name="knowledgeGraph">
         ${[['off', 'Off'], ['summary', 'Digest in the prompt (about 1,500 extra tokens a run)'], ['tools', 'Graph tools the agent can query (graphify-mcp)']].map(([v, l]) => `<option value="${v}" ${v === (p.knowledgeGraph || 'off') ? 'selected' : ''}>${l}</option>`).join('')}
       </select><span class="hint">Measure before you keep it on: compare the same kind of task with and without it on the Costs page.</span></div>
+      ${qualityFields(p)}
       <div class="field"><label>monday.com board <span class="faint">(its tickets show on the agent cards)</span></label><select name="mondayBoardId" id="mondayBoard"><option value="${esc((p.monday || {}).boardId || '')}">${(p.monday || {}).boardId ? `Board ${esc(p.monday.boardId)}` : 'None'}</option></select><span class="hint" id="mondayBoardHint">Loading your boards…</span></div>
       <div class="grid2">
         <div class="field"><label>Cost limit per run for this project <span class="faint">(USD, blank = app default)</span></label><input type="number" name="lim_budget" min="0" step="0.5" value="${lim.taskBudgetUsd ?? ''}"></div>
@@ -1983,6 +2084,7 @@ function projectForm(dlg, p, oldId) {
   }).catch(() => { const h = $('#mondayBoardHint'); if (h) h.textContent = 'Could not load boards.'; });
   dlg.onclick = async e => {
     if (e.target.closest('[data-browse-again]')) return browseFolder(dlg, '');
+    if (e.target.closest('[data-q-suggest]')) return suggestQuality(form, oldId);
     const rm = e.target.closest('[data-remove-project]');
     if (!rm) return;
     if (!confirm(`Remove "${p.name}" from Dev Crew?\nOnly the config entry goes: its folder, repos, branches and task history stay.`)) return;
@@ -2005,6 +2107,10 @@ function projectForm(dlg, p, oldId) {
       id: F.id.value.trim(), name: F.name.value, folder: F.folder.value, stack: F.stack.value, context: F.context.value,
       activeRoles, roles, handoffs: F.handoffs.value, knowledgeGraph: F.knowledgeGraph.value, allowCommands: F.allowCommands.value,
       mondayBoardId: F.mondayBoardId.value,
+      quality: {
+        commands: Object.fromEntries(Q_CHECKS.map(([k]) => [k, F[`q_${k}`].value])),
+        rules: F.q_rules.value, requireTests: F.q_requireTests.checked, noNewWarnings: F.q_noNewWarnings.checked, verify: F.q_verify.checked,
+      },
       limits: { ...(p.limits || {}), taskBudgetUsd: F.lim_budget.value, taskTimeoutMin: F.lim_time.value },
     };
     const btn = $('#cfgSave');
@@ -2171,7 +2277,7 @@ function refreshDrawer(first) {
         ${g.commits.length ? `<div class="commits">${esc(g.commits.join('\n'))}</div>` : ''}
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
-    ${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
+    ${checksHtml(t)}${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
     ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
     ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.review && t.review.result ? t.result.replace(/\n##\s*Review\s*\n[\s\S]*$/i, '') : t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
@@ -2247,6 +2353,17 @@ function noChangesHtml(t) {
 const VERDICTS = { approve: ['Looks good', 'ok'], comment: ['Comments', 'info'], request_changes: ['Changes requested', 'bad'] };
 const SEV_ICON = { critical: '⛔', major: '▲', minor: '●', nit: '·' };
 
+/** The project's checks, run by Dev Crew on this task's branch. */
+function checksHtml(t) {
+  if (t.checking) return '<div class="d-section"><h4>Checks</h4><p class="hint">Dev Crew is running the project\'s checks on this branch…</p></div>';
+  const c = t.checks || [];
+  if (!c.length) return '';
+  const bad = c.filter(x => !x.ok && !x.skipped).length;
+  return `<div class="d-section"><h4>Checks ${bad ? `<span class="verdict bad">${bad} failed</span>` : '<span class="verdict ok">passed</span>'}</h4>
+    <ul class="checks">${c.map(x => `<li class="${x.ok ? 'ok' : x.skipped ? 'skip' : 'bad'}"><div><span class="chk">${x.ok ? '✓' : x.skipped ? '–' : '✕'}</span> <b>${esc(x.label)}</b> <code>${esc(x.cmd)}</code> <span class="faint">${x.skipped ? 'skipped' : x.ms ? dur(x.ms) : ''}</span></div>${x.tail ? `<details ${x.ok || x.skipped ? '' : 'open'}><summary>Output</summary><pre class="commits">${esc(x.tail)}</pre></details>` : ''}</li>`).join('')}</ul>
+    <p class="hint">${bad && t.status === 'done' ? 'Send a follow-up asking for a fix; Dev Crew runs the checks again after it. ' : ''}Ran ${t.checksAt ? ago(t.checksAt) : ''} in the task's worktree.</p></div>`;
+}
+
 function reviewHtml(t) {
   const rv = t.review;
   if (!rv) return '';
@@ -2273,17 +2390,26 @@ function reviewHtml(t) {
   return `<div class="d-section"><h4>Review <span class="verdict ${vcls}">${vtext}</span></h4>${head}
     ${r.summary ? `<p>${esc(r.summary)}</p>` : ''}
     <p class="faint">${countText}</p>
+    ${checklistHtml(r.checklist)}
     ${rows ? `<ul class="findings">${rows}</ul>` : ''}
     ${posted}${t.status === 'done' ? post : ''}</div>`;
+}
+
+function checklistHtml(list) {
+  if (!(list || []).length) return '';
+  const n = st => list.filter(c => c.status === st).length;
+  return `<details class="checklist" ${n('fail') ? 'open' : ''}><summary>Checklist: ${n('pass')} passed · ${n('fail')} failed · ${n('n/a')} not applicable</summary>
+    <ul class="checks">${list.map(c => `<li class="${c.status === 'pass' ? 'ok' : c.status === 'fail' ? 'bad' : 'skip'}"><div><span class="chk">${c.status === 'pass' ? '✓' : c.status === 'fail' ? '✕' : '–'}</span> ${esc(c.item)}</div>${c.note ? `<div class="faint">${esc(c.note)}</div>` : ''}</li>`).join('')}</ul></details>`;
 }
 
 function mergeHtml(t, repo) {
   if (!t.mergeTarget) return '';
   const st = t.merge && t.merge.state;
-  const text = st === 'merged' ? `<b class="ok-text">Merged.</b> <code>${esc(t.branch)}</code> is <code>${esc(t.base)}</code> with <code>${esc(t.mergeTarget)}</code> merged in.`
+  const into = (t.mergeTargets || []).length > 1 ? t.mergeTargets.map(b => `<code>${esc(b)}</code>`).join(', ') : `<code>${esc(t.mergeTarget)}</code>`;
+  const text = st === 'merged' ? `<b class="ok-text">Merged.</b> <code>${esc(t.branch)}</code> is <code>${esc(t.base)}</code> with ${into} merged in.`
     : st === 'unfinished' ? '<b class="warn">The merge is not finished.</b> Conflicts are still open in the worktree.'
       : st === 'not-merged' ? `<b class="warn">Not merged.</b> The Conflict Fixer stopped without merging; its report says why.`
-        : `Merges <code>${esc(t.mergeTarget)}</code> into <code>${esc(t.base)}</code>.`;
+        : `Merges ${into} into <code>${esc(t.base)}</code>.`;
   const local = String(t.base || '').replace(/^origin\//, '');
   const cmds = st === 'merged' && repo && t.branch ? [
     ['Update the pull request branch to the fixed one (it only adds commits)', `git -C "${repo.path}" push origin ${t.branch}:${local}`],
@@ -2333,6 +2459,10 @@ function planHtml(t) {
   const p = projOf(t.projectId);
   const names = p ? p.repos.map(r => r.name) : [];
   const missing = s => s.missingRepo || (s.repo && s.repo !== '*' && names.length && !names.includes(s.repo));
+  // steps with the same number run at the same time
+  const wave = {};
+  for (const s of steps) wave[s.key] = missing(s) ? 0 : Math.max(0, ...s.dependsOn.map(k => wave[k] || 0)) + 1;
+  const wide = Math.max(0, ...Object.values(wave).map(w => Object.values(wave).filter(x => x === w && w > 0).length));
   const row = (s, i) => {
     const task = ids[i] && taskOf(ids[i]);
     const gone = missing(s);
@@ -2340,7 +2470,7 @@ function planHtml(t) {
     const warn = !gone ? ''
       : task ? `This step's repo, <code>${esc(s.repo)}</code>, isn't in ${esc(p ? p.name : 'this project')}, so it ran in <code>${esc(task.repo)}</code> instead. New plans skip steps like this.`
         : `Won't start: the <code>${esc(s.repo)}</code> repo isn't in ${esc(p ? p.name : 'this project')}. Clone it into the project folder to include it.`;
-    return `<li class="${gone && !task ? 'step-missing' : ''}">${roleChip(s.role)} <b>${esc(s.title)}</b> <span class="faint">· ${modeWord(s.mode)}${s.repo ? ' · ' + esc(s.repo) : ''}${s.dependsOn.length ? ' · after ' + s.dependsOn.map(k => esc(k)).join(', ') : ''}</span>
+    return `<li class="${gone && !task ? 'step-missing' : ''}">${wave[s.key] ? `<span class="wave" title="Steps with the same number run at the same time">${wave[s.key]}</span> ` : ''}${roleChip(s.role)} <b>${esc(s.title)}</b>${s.integrate ? ` <span class="tag">merges ${(s.mergeIn || []).length + 1} parallel branches</span>` : ''} <span class="faint">· ${modeWord(s.mode)}${s.repo ? ' · ' + esc(s.repo) : ''}${s.dependsOn.length ? ' · after ' + s.dependsOn.map(k => esc(k)).join(', ') : ''}</span>
       ${task ? ` <button class="btn sm ghost" data-task="${task.id}">${statusPill(task)}</button>` : ''}
       ${warn ? `<div class="step-warn">${warn}</div>` : ''}
       <div class="faint step-key">${esc(s.key)}</div></li>`;
@@ -2350,7 +2480,8 @@ function planHtml(t) {
   const acts = t.plan.status === 'proposed'
     ? `<div class="card-actions"><button class="btn primary" data-plan="start" ${runnable ? '' : 'disabled'}>Start plan (${runnable} task${runnable === 1 ? '' : 's'}${skipped ? `, ${skipped} skipped` : ''})</button><button class="btn ghost" data-plan="dismiss">Dismiss</button></div>`
     : `<p class="hint">Plan ${esc(t.plan.status)}${skipped ? `; ${skipped} step${skipped === 1 ? ' was' : 's were'} not started because the repo isn't in the project` : ''}.</p>`;
-  return `<div class="d-section"><h4>Plan</h4><ol class="plan">${steps.map(row).join('')}</ol>${acts}</div>`;
+  const par = wide > 1 ? `<p class="hint">Up to ${wide} steps run at the same time (the numbers show which), each on its own branch${steps.some(s => s.integrate) ? '; the Conflict Fixer then merges the parallel branches, so you review one' : ''}.${wide > (S.settings.maxConcurrent || 1) ? ` Settings allows ${S.settings.maxConcurrent} agent(s) at a time, so some wait.` : ''}</p>` : '';
+  return `<div class="d-section"><h4>Plan</h4>${par}<ol class="plan">${steps.map(row).join('')}</ol>${acts}</div>`;
 }
 
 function chainHtml(t) {

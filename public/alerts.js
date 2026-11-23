@@ -42,11 +42,15 @@ export function detectAlerts(prev, t, { roleName = id => id, projectName = id =>
         actions: [{ id: 'handoff', label: 'Start handoff', kind: 'api', method: 'POST', path: `/api/tasks/${t.id}/handoffs/${h.id}/start`, doneText: 'Handoff started', doneBody: `The ${roleName(h.role)} is on it.` }, open] });
     } else if (t.noChanges) {
       out.push({ ...base, key: `${t.id}:nochanges`, event: 'failed', title: `No changes: ${clip(t.title, 80)}`, body: `${who} on ${where} finished without a commit. ${clip(t.summary, 140)}`, actions: [open] });
+    } else if (t.mode === 'change' && (t.checks || []).some(c => !c.ok && !c.skipped)) {
+      const bad = t.checks.filter(c => !c.ok && !c.skipped).map(c => c.label);
+      out.push({ ...base, key: `${t.id}:checks`, event: 'failed', title: `Checks failed: ${clip(t.title, 80)}`,
+        body: `${bad.join(', ')} failed on the ${who}'s branch on ${where}. Send it back with a follow-up, or look at the output.`, actions: [{ ...open, label: 'See checks' }] });
     } else if (t.mode === 'change' && t.git && t.git.commits && t.git.commits.length) {
       const ask = hasReviewer(t.projectId) && t.role !== 'reviewer'
         ? [{ id: 'review', label: 'Ask the Code Reviewer', kind: 'open', url: `#/t/${t.id}/review` }] : [];
       out.push({ ...base, key: `${t.id}:review`, event: 'review', title: `Ready for review: ${clip(t.title, 80)}`,
-        body: `${who} on ${where} · ${t.git.commits.length} commit${t.git.commits.length === 1 ? '' : 's'}${t.git.shortstat ? ` · ${t.git.shortstat}` : ''}`,
+        body: `${who} on ${where} · ${t.git.commits.length} commit${t.git.commits.length === 1 ? '' : 's'}${t.git.shortstat ? ` · ${t.git.shortstat}` : ''}${(t.checks || []).length ? ` · checks passed` : ''}`,
         actions: [{ ...open, label: 'Review' }, ...ask] });
     } else {
       out.push({ ...base, key: `${t.id}:done`, event: 'done', title: `Finished: ${clip(t.title, 80)}`, body: `${who} on ${where}. ${clip(t.summary, 160)}`, actions: [open] });

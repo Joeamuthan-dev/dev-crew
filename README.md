@@ -165,6 +165,36 @@ default on Windows; turn them off, pick the events and send a test in Settings �
 nothing shows, check Windows Settings → System → Notifications and Do not disturb. On other systems,
 browser notifications are the fallback (they need a Dev Crew tab open).
 
+**Quality profile.** Each project can say what "done" means (Edit project → Quality profile):
+the build, lint, format and test commands (**Suggest from the repos** fills them in for the stack),
+the conventions the reviewer checks, whether new code needs tests, and whether new warnings are
+allowed. Agents get the exact commands, may always run them, and are told to fix what they report.
+Unless you turn it off, Dev Crew then runs the checks itself in the task's worktree after every
+change run. The results, with the output of anything that failed, show on the task, a failure
+raises a "Checks failed" alert, and the agent's own word is no longer the proof.
+
+**Stricter reviews.** The Code Reviewer goes through a checklist: your conventions first, then the
+usual rules for the stack (tests that would fail without the change, error handling, input
+validation, duplicated helpers, and for .NET async, parameterised SQL and disposal). It checks the
+callers of every changed public function, endpoint or schema, using the knowledge-graph tools when
+the project has them. It also sees the checks Dev Crew ran on the branch. A failed checklist item,
+a critical or major finding, or a failed check means it can't approve. The checklist shows on the
+review and in the comment posted on the pull request.
+
+**Parallel plans.** The Architect may split a feature into steps that don't depend on each other,
+even in the same repo (for example the API and the UI). They run at the same time, each on its own
+branch, up to Settings → Agents at a time. The plan shows which steps run together. When a repo
+ends up with several branches, or a step needs two of them, the Conflict Fixer gets a merge step
+that brings them into one branch and builds and tests it, so you review one branch. Projects
+without a Conflict Fixer keep the old behaviour: steps in the same repo run one after another.
+
+**Lessons.** Each project's **Lessons** tab keeps short facts about each repo that the next agent
+should know. They come from four places: what agents report they learned (how it builds, quirks,
+conventions), commands that were refused, checks that failed, and problems reviewers flagged. A
+repeat raises its count instead of adding a copy. The top 12 go into every later run in that repo.
+Pin the important ones, mute or delete wrong ones, or add your own (yours are pinned). When you
+allow a refused command, its lesson goes.
+
 **Full-width view.** The ☰ button at the top left (or Ctrl+B) hides the side menu, so the office
 and every page use the whole window; press it again to bring the menu back. The browser remembers
 your choice. On a phone-sized window the same button slides the menu in over the page.
@@ -446,6 +476,8 @@ lib/review.mjs      the Code Reviewer's verdict and findings, and posting them w
 lib/graph.mjs       knowledge-graph context from graphify (digest or graph tools)
 lib/integrations.mjs  tools and notifications added in Settings (MCP servers, webhooks)
 lib/toast.mjs       Windows notifications from the server, and their one-time action links
+lib/quality.mjs     quality profiles: suggested commands, the review checklist, running the checks
+lib/lessons.mjs     lessons from past runs: collected, ranked and given to the next runs
 scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
