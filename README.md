@@ -188,6 +188,11 @@ The task panel's **Chain** section shows where a task came from and what came af
 
 ## Roles
 
+Each role is written as a senior specialist with about ten years in the job: how they work, what
+"done" means for them, what they never do, and the traps they avoid (`lib/roles.mjs`). Knowledge
+about your own code goes in each role's notes in **Edit project** (for example, which tests work,
+where conflicts usually happen, the security debt to keep in view).
+
 Every project gets eight seats: Solutions Architect, Frontend, Backend, Database, QA / Test,
 DevOps & Cloud, and two that work on branches and pull requests:
 
