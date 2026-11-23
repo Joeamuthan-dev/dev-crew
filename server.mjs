@@ -1,15 +1,16 @@
 // Dev Crew server: a queue of agent runs, a daily stand-up scheduler, a small JSON API and
 // a live event stream for the dashboard. Listens on 127.0.0.1 only: these agents edit code.
 import http from 'node:http';
+import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, loadConfig, refreshRepos } from './lib/config.mjs';
-import { ROLES, roleById, roleKind } from './lib/roles.mjs';
+import { ROLES, roleById, roleKind, BUILT_IN_ROLES } from './lib/roles.mjs';
 import { parseReview, reviewMarkdown, postReview } from './lib/review.mjs';
 import * as G from './lib/git.mjs';
 import { runClaude, claudeFeatures, describeEvent, toolPolicy, resetClaude } from './lib/claude.mjs';
-import { settingsFromForm, maskSettings } from './lib/settings.mjs';
-import { collectRuns, summarize, runsCsv, filterRows, dayKey } from './lib/analytics.mjs';
+import { settingsFromForm, maskSettings, PERMISSION_MODES } from './lib/settings.mjs';
+import { collectRuns, summarize, runsCsv, filterRows, dayKey, trialJobs } from './lib/analytics.mjs';
 import { taskSystemPrompt, taskPrompt, reportSystemPrompt, reportPrompt, parseReport, summaryOf } from './lib/prompts.mjs';
 import { createStore, newId } from './lib/store.mjs';
 import { createMonday } from './lib/monday.mjs';
@@ -20,7 +21,8 @@ import { parseHandoffs, parsePlan, depsState, startPoint, handoffPolicy, MAX_CHA
 import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.mjs';
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
 import { detectProject, findRepos } from './lib/detect.mjs';
-import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules } from './lib/graph.mjs';
+import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
+import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -29,6 +31,7 @@ const TMP = path.join(DATA, 'tmp');
 const PUBLIC = path.join(ROOT, 'public');
 
 let cfg = loadConfig();
+const LISTEN_PORT = cfg.settings.port; // fixed for the life of the process
 const store = createStore(DATA);
 clearTmp(TMP); // system-prompt files left by runs that were interrupted
 const monday = createMonday(() => cfg);
@@ -40,7 +43,25 @@ setInterval(() => refreshMonday().catch(e => console.warn(e.message)), 120000);
 const S = store.state;
 
 for (const t of S.tasks) {
+  // tasks from before "No changes" existed: a finished change task with no commits made nothing
+  if (t.status === 'done' && t.mode === 'change' && t.git && !t.git.commits.length && !t.git.uncommitted && !t.mergeTarget) t.noChanges = true;
   if (t.status === 'running') { t.status = 'failed'; t.error = 'Interrupted: the server stopped during this run. Send a follow-up to continue it.'; }
+}
+// Tasks from before refused commands were kept on the task: read them back from the log once.
+for (const t of S.tasks.slice(0, 60)) {
+  if (t.refused) continue;
+  try {
+    const fresh = [];
+    for (const l of store.readLog(t.id)) {
+      const m = l.kind === 'warn' && /^Blocked by the crew's permissions: (.*)$/s.exec(l.text || '');
+      if (!m) continue;
+      for (const part of m[1].split(' · ')) {
+        const i = part.indexOf(': ');
+        if (i > 0) fresh.push({ tool: part.slice(0, i), command: part.slice(i + 2).trim() });
+      }
+    }
+    if (fresh.length) t.refused = mergeRefused([], refusedCommands(fresh.map(f => ({ tool_name: f.tool, tool_input: { command: f.command } }))));
+  } catch { /* no log */ }
 }
 for (const r of S.reports) {
   if (r.status === 'running' || r.status === 'queued') { r.status = 'failed'; r.error = 'Interrupted: the server stopped before this report finished.'; }
@@ -254,6 +275,86 @@ function graphContext(p, repo, t, tmpDir) {
   return out;
 }
 
+/* ---------------- the knowledge graph: view, status and updates ---------------- */
+
+// One graphify update at a time (it is CPU-heavy); state per project repo for the Graph tab.
+const graphJobs = new Map(); // "projectId:repo" -> { running, startedAt, endedAt, ok, error, why, output }
+let graphChain = Promise.resolve();
+
+/** Re-extract a repo's graph with `graphify update` (code only, no LLM, so no cost). */
+function runGraphUpdate(p, repo, why = 'manual') {
+  const key = `${p.id}:${repo.name}`;
+  const cur = graphJobs.get(key);
+  if (cur && (cur.running || cur.queued)) return cur;
+  const job = { queued: true, running: false, why, output: '' };
+  graphJobs.set(key, job);
+  emit('graph', { projectId: p.id, repo: repo.name, ...job });
+  graphChain = graphChain.then(() => new Promise(resolve => {
+    Object.assign(job, { queued: false, running: true, startedAt: Date.now() });
+    emit('graph', { projectId: p.id, repo: repo.name, ...job });
+    let child;
+    try {
+      child = spawn(graphifyCommand(), ['update', repo.path], { cwd: repo.path, windowsHide: true, env: process.env });
+    } catch (e) {
+      Object.assign(job, { running: false, ok: false, error: e.message, endedAt: Date.now() });
+      emit('graph', { projectId: p.id, repo: repo.name, ...job });
+      return resolve();
+    }
+    const keep = d => { job.output = (job.output + d).slice(-4000); };
+    child.stdout.on('data', keep);
+    child.stderr.on('data', keep);
+    const done = (code, err) => {
+      const ok = !err && code === 0;
+      // graphify skips the rebuild when no tracked code file changed: say so, and remember the check
+      job.unchanged = ok && /none of the .* files differ|skipping rebuild/i.test(job.output);
+      Object.assign(job, { running: false, ok, endedAt: Date.now(), error: ok ? '' : (err ? err.message : (job.output.trim().split('\n').slice(-3).join(' ') || `graphify exited with code ${code}`)).slice(0, 400) });
+      console.log(`graph ${ok ? 'updated' : 'update failed'}: ${p.name}/${repo.name} (${why}, ${Math.round((job.endedAt - job.startedAt) / 1000)}s)`);
+      emit('graph', { projectId: p.id, repo: repo.name, ...job });
+      resolve();
+    };
+    child.on('error', e => done(-1, /ENOENT/.test(e.message) ? new Error('graphify was not found. Install it with: uv tool install graphifyy') : e));
+    child.on('close', code => done(code));
+  }));
+  return job;
+}
+
+/** What the Graph tab shows for each repo of a project. */
+async function graphInfo(p) {
+  refreshRepos(p);
+  const out = [];
+  for (const repo of p.repos) {
+    const g = findGraph(repo.path);
+    const job = graphJobs.get(`${p.id}:${repo.name}`) || null;
+    const row = { repo: repo.name, exists: !!(g && g.graph), builtAt: g ? g.builtAt : 0, hasView: !!(g && fs.existsSync(path.join(g.dir, 'graph.html'))), job };
+    if (g && g.report) Object.assign(row, graphStats(fs.readFileSync(g.report, 'utf8')));
+    if (g && g.builtAt) {
+      const since = new Date(g.builtAt).toISOString();
+      row.commitsSince = Number(await G.git(repo.path, ['rev-list', '--count', `--since=${since}`, 'HEAD'], { allowFail: true })) || 0;
+      row.branch = await G.currentBranch(repo.path);
+    }
+    out.push(row);
+  }
+  return { mode: p.graphUpdate || 'off', modes: GRAPH_UPDATE_MODES, repos: out };
+}
+
+// Automatic updates: every half hour, for projects that asked for them.
+async function checkGraphUpdates() {
+  for (const p of cfg.projects) {
+    if (!p.graphUpdate || p.graphUpdate === 'off') continue;
+    refreshRepos(p);
+    for (const repo of p.repos) {
+      const g = findGraph(repo.path);
+      if (!g || !g.graph) continue;
+      const last = Number(await G.git(repo.path, ['log', '-1', '--format=%ct'], { allowFail: true })) * 1000 || 0;
+      const prev = graphJobs.get(`${p.id}:${repo.name}`);
+      const checkedAt = prev && prev.ok ? prev.endedAt || 0 : 0;
+      if (graphUpdateDue(p.graphUpdate, { builtAt: g.builtAt, lastCommitAt: last, checkedAt })) runGraphUpdate(p, repo, p.graphUpdate === 'weekly' ? 'weekly' : 'new commits');
+    }
+  }
+}
+setInterval(() => checkGraphUpdates().catch(e => console.warn('graph check:', e.message)), 30 * 60000);
+setTimeout(() => checkGraphUpdates().catch(() => {}), 20000);
+
 function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'task';
 }
@@ -339,13 +440,14 @@ async function execTask(t, handle) {
         graph: graphCtx.block,
         cwd, branch: t.branch, base: t.base, readFrom,
         prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
-        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) ? 'off' : policyFor(p),
+        // a plan step's next steps are the plan's own, so it proposes no handoffs of its own
+        handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) || t.origin === 'plan' ? 'off' : policyFor(p),
         plan: !!t.planTask,
         review: t.review, mergeTarget: t.mergeTarget,
       }),
       mode: t.mode,
       kind,
-      extraCommands: p.allowCommands,
+      extraCommands: [...(cfg.settings.allowCommands || []), ...(p.allowCommands || [])],
       model,
       resume,
       addDirs,
@@ -375,6 +477,9 @@ async function execTask(t, handle) {
     if (res.denials.length) {
       const what = res.denials.map(d => d.tool_name + (d.tool_input && d.tool_input.command ? `: ${d.tool_input.command}` : '')).join(' · ');
       log(t.id, 'warn', `Blocked by the crew's permissions: ${what}`.slice(0, 800));
+      // kept on the task, so the panel can show them and offer to allow them for the project
+      const fresh = refusedCommands(res.denials);
+      if (fresh.length) t.refused = mergeRefused(t.refused, fresh);
     }
     if (res.result) {
       t.result = res.result;
@@ -382,6 +487,10 @@ async function execTask(t, handle) {
       (t.history = t.history || []).push({ at: Date.now(), prompt: followup || t.title, result: res.result });
     }
     if (t.mode === 'change' && t.baseSha) t.git = await G.branchSummary(repo.path, t.baseSha, t.branch, t.worktree);
+    // A change task with no commits and nothing uncommitted made nothing: say so, never 'done' alone.
+    if (t.mode === 'change' && t.git && res.ok && !handle.cancelled && !handle.limitHit) {
+      if (!t.git.commits.length && !t.git.uncommitted && !t.mergeTarget) t.noChanges = true; else delete t.noChanges;
+    }
     if (kind === 'review' && t.review && res.result) {
       const found = parseReview(res.result);
       if (found) t.review = { ...t.review, result: found, posted: null };
@@ -607,7 +716,10 @@ const publicProject = p => ({
   repos: p.repos.map(r => ({ name: r.name, path: r.path, exists: r.exists })), roles: p.roles,
   handoffs: policyFor(p),
   activeRoles: p.activeRoles,
+  allowCommands: p.allowCommands,
+  mondayBoardId: p.monday ? String(p.monday.boardId || '') : '',
   knowledgeGraph: p.knowledgeGraph,
+  graphUpdate: p.graphUpdate,
   graphs: Object.fromEntries(p.repos.map(r => [r.name, !!findGraph(r.path)])),
 });
 
@@ -660,6 +772,11 @@ const policyFor = p => handoffPolicy(cfg.settings.handoffs, p && p.handoffs);
  */
 function followRepo(p, spec, prev) {
   const names = p.repos.map(r => r.name);
+  // A repo that is named but not in the project is an error, never a silent switch to another
+  // repo: a frontend change "in" the API repo only wastes a run.
+  if (spec.repo && spec.repo !== '*' && !names.includes(spec.repo)) {
+    throw new Error(`"${spec.title}" is for the ${spec.repo} repo, which is not in ${p.name} (${names.join(', ') || 'no repos'}). Clone it into the project folder, or assign the work yourself.`);
+  }
   const pick = [spec.repo, prev && prev.repo !== '*' ? prev.repo : '', (p.roles[spec.role] || {}).repo, names.length === 1 ? names[0] : '']
     .find(n => n && names.includes(n));
   if (pick) return pick;
@@ -687,7 +804,17 @@ function startPlan(planTask) {
   const plan = planTask.plan;
   const idByKey = {};
   const made = [];
+  const ids = [];
+  const names = p.repos.map(r => r.name);
+  const skipped = [];
   for (const s of plan.steps) {
+    // Steps for a repo the project does not have are shown in the plan but never started.
+    if (s.missingRepo || (s.repo && s.repo !== '*' && !names.includes(s.repo))) {
+      s.missingRepo = true;
+      skipped.push(s.title);
+      ids.push(null);
+      continue;
+    }
     const deps = s.dependsOn.map(k => idByKey[k]).filter(Boolean);
     const depTasks = deps.map(taskById);
     // Build on the latest dependency that changes the same repo; else read the latest one.
@@ -700,9 +827,12 @@ function startPlan(planTask) {
     }, { deferPump: true });
     idByKey[s.key] = child.id;
     made.push(child);
+    ids.push(child.id);
   }
-  Object.assign(plan, { status: 'started', taskIds: made.map(t => t.id) });
+  if (!made.length) throw new Error('Every step of this plan is for a repo that is not in the project, so nothing was started.');
+  Object.assign(plan, { status: 'started', taskIds: ids });
   log(planTask.id, 'sys', `Plan started: ${made.length} linked task(s).`);
+  if (skipped.length) log(planTask.id, 'warn', `Not started, because their repo is not in ${p.name}: ${skipped.map(x => `"${x}"`).join(', ')}.`);
   pump();
   return made;
 }
@@ -712,7 +842,7 @@ function takeNextSteps(t, p, result) {
   const policy = policyFor(p);
   const roleIds = (p && p.activeRoles && p.activeRoles.length) ? p.activeRoles : ROLES.map(r => r.id);
   if (t.planTask) {
-    const steps = parsePlan(result, { roleIds });
+    const steps = parsePlan(result, { roleIds, repoNames: p ? p.repos.map(r => r.name) : null });
     if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
     t.plan = { steps, status: 'proposed' };
     if (policy === 'auto') {
@@ -720,7 +850,7 @@ function takeNextSteps(t, p, result) {
     }
     return;
   }
-  if (policy === 'off') return;
+  if (policy === 'off' || t.origin === 'plan') return;
   const found = parseHandoffs(result, { fromRole: t.role, roleIds });
   const have = new Set((t.handoffs || []).map(h => `${h.role}:${h.title.toLowerCase()}`));
   for (const h of found) {
@@ -1086,6 +1216,58 @@ async function route(req, res, url) {
     return send(res, 200, { ok: true, id: proj.id });
   }
 
+  // The Graph tab: GET /api/projects/:id/graph (status), GET …/graph/:repo/view (graphify's
+  // interactive page), POST …/graph/:repo/update (refresh it now), POST …/graph-update {mode}.
+  if (parts[1] === 'projects' && parts[2] && (parts[3] === 'graph' || parts[3] === 'graph-update')) {
+    const p = project(parts[2]);
+    if (!p) return send(res, 404, { error: 'Unknown project.' });
+    if (m === 'GET' && parts[3] === 'graph' && !parts[4]) return send(res, 200, await graphInfo(p));
+    if (m === 'POST' && parts[3] === 'graph-update') {
+      const { mode } = await readBody(req);
+      if (!GRAPH_UPDATE_MODES.includes(mode)) return send(res, 400, { error: 'Unknown update setting.' });
+      const raw = readRaw();
+      const rawP = (raw.projects || []).find(x => x.id === p.id);
+      if (!rawP) return send(res, 404, { error: 'This project is not in crew.config.local.json.' });
+      if (mode === 'off') delete rawP.graphUpdate; else rawP.graphUpdate = mode;
+      writeRaw(raw);
+      cfg = loadConfig();
+      emit('reload', {});
+      if (mode !== 'off') checkGraphUpdates().catch(() => {});
+      return send(res, 200, { ok: true, mode });
+    }
+    const repo = parts[4] && p.repos.find(r => r.name === decodeURIComponent(parts[4]));
+    if (!repo) return send(res, 404, { error: 'Unknown repo.' });
+    const g = findGraph(repo.path);
+    if (m === 'GET' && parts[5] === 'view') {
+      const file = g && path.join(g.dir, 'graph.html');
+      if (!file || !fs.existsSync(file)) return send(res, 404, { error: 'This repo has no graph view yet.' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return fs.createReadStream(file).pipe(res);
+    }
+    if (m === 'POST' && parts[5] === 'update') {
+      if (!g || !g.graph) return send(res, 400, { error: 'This repo has no graph yet. Build the first one with /graphify in Claude Code; after that Dev Crew can keep it up to date.' });
+      return send(res, 200, runGraphUpdate(p, repo, 'manual'));
+    }
+  }
+
+  // POST /api/projects/:id/allow {rule}: add a command an agent was refused to the project's
+  // allowed commands (change tasks only; the always-refused list still wins).
+  if (m === 'POST' && parts[1] === 'projects' && parts[2] && parts[3] === 'allow') {
+    const { rule } = await readBody(req);
+    const r = String(rule || '').trim().replace(/\s+/g, ' ');
+    const problem = ruleProblem(r);
+    if (problem) return send(res, 400, { error: problem });
+    const raw = readRaw();
+    const rawP = (raw.projects || []).find(p => p.id === parts[2]);
+    if (!rawP) return send(res, 404, { error: 'This project is not in crew.config.local.json.' });
+    const list = Array.isArray(rawP.allowCommands) ? rawP.allowCommands : [];
+    if (!list.includes(r)) rawP.allowCommands = [...list, r];
+    writeRaw(raw);
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, allowCommands: rawP.allowCommands });
+  }
+
   if (m === 'DELETE' && parts[1] === 'projects' && parts[2] && !parts[3]) {
     if (S.tasks.some(t => t.projectId === parts[2] && ['queued', 'running', 'blocked'].includes(t.status))) {
       return send(res, 409, { error: 'Finish or cancel this project\'s active tasks first.' });
@@ -1102,7 +1284,16 @@ async function route(req, res, url) {
     const day = s => (/^\d{4}-\d{2}-\d{2}$/.test(s || '') ? s : undefined);
     const filters = { from: day(q.get('from')), to: day(q.get('to')), projectId: q.get('project') || undefined, role: q.get('role') || undefined, model: q.get('model') || undefined };
     const archived = readArchive();
-    const tasks = [...S.tasks, ...archived.tasks];
+    // knowledge-graph trial runs are real spend too
+    const trials = [];
+    try {
+      const dir = path.join(DATA, 'graph-trial');
+      for (const f of fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => n.endsWith('.json')) : []) {
+        try { trials.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))); } catch { /* a half-written file */ }
+      }
+    } catch { /* no trials */ }
+    const idOf = name => (cfg.projects.find(p => p.name === name || p.id === name) || {}).id || name;
+    const tasks = [...S.tasks, ...archived.tasks, ...trialJobs(trials, idOf)];
     const rows = collectRuns({ tasks, reports: [...S.reports, ...archived.reports] });
     const projectName = id => (project(id) || {}).name || id;
     if (url.pathname.endsWith('.csv')) {
@@ -1119,7 +1310,7 @@ async function route(req, res, url) {
       ...summary,
       options: {
         projects: cfg.projects.map(p => ({ id: p.id, name: p.name })),
-        roles: [...new Set([...ROLES.map(r => r.id), 'stand-up'])],
+        roles: [...new Set([...ROLES.map(r => r.id), 'stand-up', ...(trials.length ? ['graph-trial'] : [])])],
         models: [...new Set(rows.map(r => r.model))].sort(),
         firstDay: rows.length ? rows[0].day : dayKey(Date.now()),
         hasArchive: archived.tasks.length + archived.reports.length > 0,
@@ -1140,6 +1331,8 @@ async function route(req, res, url) {
         limits: cfg.settings.limits, handoffs: cfg.settings.handoffs, dailyReport: cfg.settings.dailyReport,
         housekeeping: cfg.settings.housekeeping, ui: cfg.settings.ui, claudeCommand: cfg.settings.claudeCommand,
         inheritClaudeEnv: cfg.settings.inheritClaudeEnv, workspacePath: cfg.settings.workspacePath, port: cfg.settings.port,
+        workspace: cfg.settings.workspace, permissionMode: cfg.settings.permissionMode || '', permissionModes: PERMISSION_MODES,
+        strictMcp: !!cfg.settings.strictMcp, allowCommands: cfg.settings.allowCommands || [],
         configFile: path.basename(cfg.file),
       },
       mondayTokenFromEnv: !!process.env.MONDAY_API_TOKEN,
@@ -1162,7 +1355,113 @@ async function route(req, res, url) {
     if (cfg.settings.claudeCommand !== before) resetClaude();
     pump(); // a higher "agents at a time" or daily limit can start waiting work now
     emit('reload', {});
-    return send(res, 200, { ok: true, restartNeeded: false });
+    // a new port takes effect after a restart; everything else applies straight away
+    return send(res, 200, { ok: true, restartNeeded: cfg.settings.port !== LISTEN_PORT, port: cfg.settings.port });
+  }
+
+  /* ----- Settings: roles editor ----- */
+  // GET /api/roles: every role with its instructions, and the built-in defaults for "Reset".
+  if (m === 'GET' && url.pathname === '/api/roles') {
+    return send(res, 200, { roles: ROLES, defaults: Object.fromEntries(BUILT_IN_ROLES.map(r => [r.id, r])), overrides: readRaw().roles || [] });
+  }
+  // PUT /api/roles/:id: save a role (only what differs from the built-in one is stored).
+  // DELETE /api/roles/:id: reset a built-in role to its default, or remove a custom role.
+  if (parts[1] === 'roles' && parts[2] && (m === 'PUT' || m === 'DELETE')) {
+    const id = parts[2];
+    const raw = readRaw();
+    const list = Array.isArray(raw.roles) ? raw.roles.filter(r => r && r.id !== id) : [];
+    const def = BUILT_IN_ROLES.find(r => r.id === id);
+    if (m === 'DELETE') {
+      if (!def && S.tasks.some(t => t.role === id && ['queued', 'running'].includes(t.status))) return send(res, 409, { error: 'This role has work queued or running. Wait for it to finish first.' });
+      writeRaw({ ...raw, roles: list });
+    } else {
+      const b = await readBody(req);
+      const fields = {};
+      for (const k of ['name', 'short', 'color', 'defaultMode', 'focus', 'prompt']) if (b[k] !== undefined) fields[k] = typeof b[k] === 'string' ? b[k].trim() : b[k];
+      if (!def && (!/^[a-z][a-z0-9-]{0,30}$/.test(id) || id === 'stand-up')) return send(res, 400, { error: 'A role id is lower-case letters, digits and dashes, starting with a letter.' });
+      const entry = { id };
+      for (const [k, v] of Object.entries(fields)) if (!def || v !== def[k]) entry[k] = v;
+      if (Object.keys(entry).length > 1 || !def) list.push(entry);
+      writeRaw({ ...raw, roles: list });
+    }
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, roles: ROLES });
+  }
+
+  /* ----- Settings: integrations ----- */
+  // GET /api/checks: is each tool Dev Crew uses installed, signed in and working?
+  if (m === 'GET' && url.pathname === '/api/checks') {
+    const run = (cmd, args) => new Promise(resolve => execFile(cmd, args, { timeout: 20000, windowsHide: true }, (err, out, errOut) => resolve({ ok: !err, out: String(out || errOut || (err && err.message) || '').trim() })));
+    const gh = fs.existsSync(path.join(process.env.LOCALAPPDATA || '', 'Programs', 'gh', 'bin', 'gh.exe')) ? path.join(process.env.LOCALAPPDATA, 'Programs', 'gh', 'bin', 'gh.exe') : 'gh';
+    resetClaude();
+    const [claude, git, ghVer, ghAuth, graph, graphMcp] = await Promise.all([
+      claudeFeatures(cfg.settings.claudeCommand),
+      run('git', ['--version']),
+      run(gh, ['--version']),
+      run(gh, ['auth', 'status']),
+      run(graphifyCommand(), ['--help']),
+      new Promise(resolve => { const p = path.join(process.env.USERPROFILE || process.env.HOME || '', '.local', 'bin', process.platform === 'win32' ? 'graphify-mcp.exe' : 'graphify-mcp'); resolve({ ok: fs.existsSync(p) }); }),
+    ]);
+    let mondayCheck;
+    try { mondayCheck = await monday.check(); } catch (e) { mondayCheck = { ok: false, error: e.message }; }
+    const line = s => s.split('\n')[0].slice(0, 160);
+    const ghUser = /accounts+(S+)/i.exec(ghAuth.out) || /ass+(S+)/i.exec(ghAuth.out);
+    return send(res, 200, { checks: [
+      { id: 'claude', name: 'Claude Code', ok: claude.found, detail: claude.found ? `${claude.version}${claude.maxBudget ? '' : ' · no --max-budget-usd: update with claude update'}` : 'Not found. Install Claude Code and run claude once to sign in.', needed: 'Runs every agent.' },
+      { id: 'git', name: 'Git', ok: git.ok, detail: git.ok ? line(git.out) : 'Not found on PATH.', needed: 'Worktrees and branches.' },
+      { id: 'gh', name: 'GitHub CLI', ok: ghVer.ok && ghAuth.ok, detail: !ghVer.ok ? 'Not installed (only needed to post reviews on pull requests).' : ghAuth.ok ? `Signed in${ghUser ? ` as ${ghUser[1]}` : ''}` : 'Installed but not signed in: run gh auth login.', needed: 'Posting Code Reviewer findings on pull requests.' },
+      { id: 'monday', name: 'monday.com', ok: mondayCheck.ok, detail: mondayCheck.ok ? `Connected as ${mondayCheck.detail}` : (mondayCheck.error === 'No token set.' ? 'No token: demo tickets are shown. Add a token below.' : mondayCheck.error), needed: 'Tickets on agent cards, assigning and updating tickets.' },
+      { id: 'graphify', name: 'graphify', ok: graph.ok, detail: graph.ok ? `Installed${graphMcp.ok ? ', with graph tools (graphify-mcp)' : ''}` : 'Not installed where Dev Crew runs: uv tool install "graphifyy[mcp]" --python 3.12', needed: 'The Graph tab and the knowledge-graph option.' },
+    ] });
+  }
+  // GET /api/monday/boards: the boards the token can see (the board picker in Edit project).
+  if (m === 'GET' && url.pathname === '/api/monday/boards') {
+    try { return send(res, 200, { connected: monday.connected(), boards: await monday.listBoards() }); }
+    catch (e) { return send(res, 200, { connected: monday.connected(), boards: [], error: e.message }); }
+  }
+
+  /* ----- Settings: backups, export and import ----- */
+  const BACKUP_DIR = path.join(DATA, 'config-backups');
+  if (m === 'GET' && url.pathname === '/api/config/backups') {
+    const list = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter(f => /^crew\.config\.local\..*\.json$/.test(f)).sort().reverse() : [];
+    return send(res, 200, { backups: list.slice(0, 20).map(f => {
+      const full = path.join(BACKUP_DIR, f);
+      let projects = 0;
+      try { projects = (JSON.parse(fs.readFileSync(full, 'utf8')).projects || []).length; } catch { /* unreadable */ }
+      return { name: f, at: fs.statSync(full).mtimeMs, size: fs.statSync(full).size, projects };
+    }) });
+  }
+  if (m === 'POST' && url.pathname === '/api/config/restore') {
+    const { name } = await readBody(req);
+    if (!/^crew\.config\.local\.[\w.-]+\.json$/.test(String(name || ''))) return send(res, 400, { error: 'Unknown backup.' });
+    const file = path.join(BACKUP_DIR, name);
+    if (!fs.existsSync(file)) return send(res, 404, { error: 'That backup is gone.' });
+    writeRaw(JSON.parse(fs.readFileSync(file, 'utf8'))); // validates, and backs up the current file first
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true });
+  }
+  // GET /api/config/export: the whole setup as a file, without the monday.com token.
+  if (m === 'GET' && url.pathname === '/api/config/export') {
+    const raw = readRaw();
+    if (raw.settings && raw.settings.monday) raw.settings.monday = { ...raw.settings.monday, token: '' };
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-disposition': `attachment; filename="dev-crew-config-${dayKey(Date.now())}.json"`, 'cache-control': 'no-store' });
+    return res.end(JSON.stringify(raw, null, 2) + '\n');
+  }
+  // POST /api/config/import {config}: replace the setup with an exported one (the current file is
+  // backed up first; this machine's monday.com token is kept when the file has none).
+  if (m === 'POST' && url.pathname === '/api/config/import') {
+    const { config } = await readBody(req);
+    if (!config || typeof config !== 'object' || !Array.isArray(config.projects)) return send(res, 400, { error: 'This is not a Dev Crew config file (it has no "projects" list).' });
+    const cur = readRaw();
+    const next = JSON.parse(JSON.stringify(config));
+    const tok = cur.settings && cur.settings.monday && cur.settings.monday.token;
+    if (tok && !(next.settings && next.settings.monday && next.settings.monday.token)) next.settings = { ...(next.settings || {}), monday: { ...((next.settings || {}).monday || {}), token: tok } };
+    writeRaw(next);
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, projects: cfg.projects.length });
   }
 
   if (m === 'GET' && url.pathname === '/api/people') return send(res, 200, { people: readRaw().people || [] });
@@ -1180,7 +1479,8 @@ async function route(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: cfg.settings.port });
+  // the port this process listens on: a new port saved in Settings only applies after a restart
+  const refused = checkRequest({ method: req.method, pathname: url.pathname, headers: req.headers, port: LISTEN_PORT });
   if (refused) return send(res, refused.code, { error: refused.error });
   try {
     if (url.pathname.startsWith('/api/')) return await route(req, res, url);
@@ -1204,9 +1504,9 @@ const shutdown = () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-server.listen(cfg.settings.port, '127.0.0.1', async () => {
+server.listen(LISTEN_PORT, '127.0.0.1', async () => {
   const f = await claudeFeatures(cfg.settings.claudeCommand);
-  console.log(`\nDev Crew → http://localhost:${cfg.settings.port}`);
+  console.log(`\nDev Crew → http://localhost:${LISTEN_PORT}`);
   console.log(`  config:    ${cfg.file}`);
   console.log(`  workspace: ${cfg.settings.workspacePath}`);
   for (const p of cfg.projects) {

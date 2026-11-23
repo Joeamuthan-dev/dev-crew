@@ -1,0 +1,261 @@
+/* ======================================================================
+   Liquid glass theme. Loaded after style.css and layered on top of it:
+   translucent surfaces with a backdrop blur over a soft colour wash,
+   the system font, pill buttons, segmented controls and floating sheets.
+   Text colours are kept at WCAG AA. "Reduce transparency" in the OS turns
+   the glass into solid surfaces.
+   ====================================================================== */
+
+:root {
+  --bg: #f2f3f7;
+  --panel: #ffffff;
+  --panel-2: rgba(118, 118, 128, .10);
+  --line: rgba(60, 60, 67, .14);
+  --text: #1d1d1f;
+  --muted: #55595f;
+  --faint: #5b6069;
+  --accent: #0066cc;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(0, 113, 227, .12);
+  --accent-btn: #0071e3;
+  --radius: 18px;
+  --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 6px 20px rgba(15, 23, 42, .06);
+  --shadow-lg: 0 24px 60px rgba(15, 23, 42, .18), 0 2px 8px rgba(15, 23, 42, .06);
+
+  --glass: rgba(255, 255, 255, .58);
+  --glass-strong: rgba(255, 255, 255, .78);
+  --glass-edge: rgba(255, 255, 255, .75);
+  --glass-line: rgba(15, 23, 42, .08);
+  --glass-hi: inset 0 1px 0 rgba(255, 255, 255, .85), inset 0 0 0 1px rgba(255, 255, 255, .35);
+  --blur: saturate(180%) blur(24px);
+  --fill: rgba(118, 118, 128, .12);
+  --fill-strong: rgba(118, 118, 128, .2);
+  --wash:
+    radial-gradient(1100px 760px at 8% -12%, rgba(120, 170, 255, .45), transparent 60%),
+    radial-gradient(900px 700px at 105% 0%, rgba(214, 160, 255, .38), transparent 58%),
+    radial-gradient(1000px 800px at 60% 115%, rgba(120, 220, 200, .32), transparent 60%),
+    linear-gradient(180deg, #f5f6fa, #eef0f5);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b0c10;
+  --panel: #1c1d22;
+  --panel-2: rgba(255, 255, 255, .07);
+  --line: rgba(255, 255, 255, .1);
+  --text: #f5f5f7;
+  --muted: #b0b3ba;
+  --faint: #9a9ea6;
+  --accent: #4da3ff;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(10, 132, 255, .2);
+  --accent-btn: #0071e3;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .25);
+  --shadow-lg: 0 28px 70px rgba(0, 0, 0, .55), 0 2px 10px rgba(0, 0, 0, .3);
+  --glass: rgba(30, 31, 38, .55);
+  --glass-strong: rgba(30, 31, 38, .78);
+  --glass-edge: rgba(255, 255, 255, .1);
+  --glass-line: rgba(255, 255, 255, .08);
+  --glass-hi: inset 0 1px 0 rgba(255, 255, 255, .1), inset 0 0 0 1px rgba(255, 255, 255, .04);
+  --fill: rgba(118, 118, 128, .24);
+  --fill-strong: rgba(118, 118, 128, .36);
+  --wash:
+    radial-gradient(1100px 760px at 8% -12%, rgba(40, 80, 190, .42), transparent 60%),
+    radial-gradient(900px 700px at 105% 0%, rgba(120, 50, 170, .36), transparent 58%),
+    radial-gradient(1000px 800px at 60% 115%, rgba(20, 120, 110, .3), transparent 60%),
+    linear-gradient(180deg, #0d0e13, #08090c);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0c10;
+    --panel: #1c1d22;
+    --panel-2: rgba(255, 255, 255, .07);
+    --line: rgba(255, 255, 255, .1);
+    --text: #f5f5f7;
+    --muted: #b0b3ba;
+    --faint: #9a9ea6;
+    --accent: #4da3ff;
+    --accent-ink: #ffffff;
+    --accent-soft: rgba(10, 132, 255, .2);
+    --accent-btn: #0071e3;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .25);
+    --shadow-lg: 0 28px 70px rgba(0, 0, 0, .55), 0 2px 10px rgba(0, 0, 0, .3);
+    --glass: rgba(30, 31, 38, .55);
+    --glass-strong: rgba(30, 31, 38, .78);
+    --glass-edge: rgba(255, 255, 255, .1);
+    --glass-line: rgba(255, 255, 255, .08);
+    --glass-hi: inset 0 1px 0 rgba(255, 255, 255, .1), inset 0 0 0 1px rgba(255, 255, 255, .04);
+    --fill: rgba(118, 118, 128, .24);
+    --fill-strong: rgba(118, 118, 128, .36);
+    --wash:
+      radial-gradient(1100px 760px at 8% -12%, rgba(40, 80, 190, .42), transparent 60%),
+      radial-gradient(900px 700px at 105% 0%, rgba(120, 50, 170, .36), transparent 58%),
+      radial-gradient(1000px 800px at 60% 115%, rgba(20, 120, 110, .3), transparent 60%),
+      linear-gradient(180deg, #0d0e13, #08090c);
+  }
+}
+
+/* ---------- page ---------- */
+body {
+  font-family: var(--font);
+  background: var(--wash);
+  background-color: var(--bg);
+  background-attachment: fixed;
+  letter-spacing: -.005em;
+}
+h1, h2, h3, .page-head h1, .office-head h1, .brand { font-family: var(--font-display); letter-spacing: -.022em; }
+.page-head h1 { font-size: 28px; font-weight: 700; }
+.section-title { font-size: 17px; font-weight: 650; letter-spacing: -.015em; }
+
+/* The glass recipe, shared by every floating surface. */
+.topbar, .sidebar, .card, .drawer, .modal, .people-pop, .office-head, .office-feed, .ac,
+.ol-zone, .ol-agent, .ol-hub, .office-tools .icon-btn, .toast, .set-save {
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+}
+
+/* ---------- top bar and side menu ---------- */
+.topbar {
+  background: var(--glass-strong);
+  border-bottom: 1px solid var(--glass-line);
+  box-shadow: 0 1px 0 var(--glass-edge) inset;
+}
+.brand-mark {
+  border-radius: 9px;
+  background: linear-gradient(145deg, #4aa3ff, #0066cc 55%, #6a5cff);
+  box-shadow: 0 4px 12px rgba(0, 102, 204, .35), inset 0 1px 0 rgba(255, 255, 255, .45);
+  color: #fff;
+}
+.people-search input { border-radius: 999px; background: var(--fill); border-color: transparent; }
+.people-search input:focus { background: var(--glass-strong); }
+
+.sidebar {
+  background: var(--glass);
+  border-right: 1px solid var(--glass-line);
+  padding: 14px 12px;
+}
+.nav-item { border-radius: 10px; padding: 8px 11px; font-weight: 500; }
+.nav-item:hover { background: var(--fill); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.nav-label { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--faint); }
+.nav-foot { border-top-color: var(--glass-line); }
+.count.live { background: var(--accent-btn); color: #fff; }
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-hi), var(--shadow);
+}
+.proj-card:hover, .crew-card:hover, .card:hover { border-color: var(--glass-edge); }
+.proj-card { padding: 18px; }
+.headline, .box, .cmd, .log { background: var(--fill); border-radius: 12px; }
+.notice { background: color-mix(in srgb, var(--amber-soft) 80%, transparent); border: 1px solid var(--glass-edge); border-radius: 14px; -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
+.empty-state { border-radius: var(--radius); }
+
+/* ---------- controls ---------- */
+.btn {
+  height: 32px; padding: 0 14px; border-radius: 999px;
+  background: var(--glass-strong); border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-hi); font-weight: 550;
+}
+.btn:hover { background: var(--panel); }
+.btn.sm { height: 27px; padding: 0 11px; }
+.btn.primary {
+  background: var(--accent-btn); border-color: transparent; color: #fff;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .25) inset, 0 4px 12px rgba(0, 113, 227, .3);
+}
+.btn.primary:hover { filter: brightness(1.07); background: var(--accent-btn); }
+.btn.ghost { background: transparent; border-color: transparent; box-shadow: none; }
+.btn.ghost:hover { background: var(--fill); }
+.btn.danger { color: var(--red); }
+.icon-btn {
+  border-radius: 10px; background: var(--glass-strong); border: 1px solid var(--glass-line); box-shadow: var(--glass-hi);
+}
+.icon-btn:hover { background: var(--panel); }
+
+input[type=text], input[type=search], input[type=number], input[type=time], input[type=password], select, textarea {
+  background: var(--fill); border: 1px solid transparent; border-radius: 10px; color: var(--text);
+}
+input:focus, select:focus, textarea:focus, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  background: var(--panel); border-color: var(--accent); box-shadow: var(--focus-ring);
+}
+
+/* segmented controls, Apple style: a fill track with a raised selected segment */
+.seg { background: var(--fill); border: 0; border-radius: 10px; padding: 2px; gap: 2px; }
+.seg span { border: 0; border-radius: 8px; padding: 5px 13px; color: var(--text); }
+.seg input:checked + span { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 1px 1px rgba(0, 0, 0, .04); font-weight: 600; }
+
+.tabs { border-bottom: 0; background: var(--fill); border-radius: 12px; padding: 3px; display: inline-flex; gap: 2px; }
+.tab { border: 0; border-radius: 9px; padding: 6px 16px; margin: 0; }
+.tab.active { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+.chip-btn { border-radius: 999px; background: var(--fill); border-color: transparent; color: var(--text); }
+.chip-btn.on { background: var(--accent-btn); border-color: transparent; color: #fff; }
+.pill { border-radius: 999px; }
+
+.role-pick label, .mode-pick label { border-radius: 12px; background: var(--fill); border-color: transparent; }
+.role-pick label:has(input:checked), .mode-pick label:has(input:checked) { background: var(--panel); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+
+/* ---------- task panel, dialogs, pop-overs, toasts ---------- */
+.drawer {
+  top: 10px; right: 10px; bottom: 10px; height: auto;
+  width: min(640px, calc(100vw - 20px));
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-edge);
+  border-radius: 22px;
+  box-shadow: var(--glass-hi), var(--shadow-lg);
+  transform: translateX(calc(100% + 24px));
+  overflow: hidden;
+}
+.drawer.open { transform: none; }
+.d-head, .d-foot { border-color: var(--glass-line); }
+.scrim { background: rgba(10, 12, 18, .18); }
+
+.modal {
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-edge);
+  border-radius: 24px;
+  box-shadow: var(--glass-hi), var(--shadow-lg);
+}
+.modal::backdrop { background: rgba(10, 12, 18, .25); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.m-head, .m-foot { border-color: var(--glass-line); }
+
+.people-pop { background: var(--glass-strong); border: 1px solid var(--glass-edge); border-radius: 18px; box-shadow: var(--glass-hi), var(--shadow-lg); }
+
+.toast {
+  border-radius: 999px; padding: 10px 18px;
+  background: rgba(28, 28, 30, .82); color: #fff;
+  box-shadow: var(--shadow-lg);
+}
+.toast.err { background: rgba(185, 28, 28, .9); }
+
+/* ---------- the office's overlays ---------- */
+.office-head, .office-feed {
+  background: var(--glass); border: 1px solid var(--glass-edge); border-radius: 18px;
+  box-shadow: var(--glass-hi), var(--shadow);
+}
+.office-tools .icon-btn { background: var(--glass); }
+.ac { background: var(--glass-strong); border: 1px solid var(--glass-edge); border-top: 3px solid var(--rc); border-radius: 18px; box-shadow: var(--glass-hi), var(--shadow-lg); }
+.ac::after { background: var(--glass-strong); border-color: var(--glass-edge); }
+.ol-zone { background: var(--glass-strong); border: 1px solid var(--glass-edge); box-shadow: var(--glass-hi), var(--shadow); }
+.ol-agent { background: var(--glass-strong); border-color: var(--glass-edge); border-radius: 10px; box-shadow: var(--glass-hi), var(--shadow); }
+.ol-hub { background: color-mix(in srgb, var(--accent-soft) 80%, var(--glass-strong)); }
+
+/* ---------- Costs charts sit on glass too ---------- */
+.viz-tip { background: var(--glass-strong); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-radius: 12px; }
+
+/* ---------- when the OS asks for less transparency, or no blur is possible ---------- */
+@media (prefers-reduced-transparency: reduce) {
+  :root { --glass: var(--panel); --glass-strong: var(--panel); }
+  .topbar, .sidebar, .card, .drawer, .modal, .people-pop, .office-head, .office-feed, .ac,
+  .ol-zone, .ol-agent, .ol-hub, .office-tools .icon-btn, .toast, .notice, .viz-tip { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --glass: var(--panel); --glass-strong: var(--panel); }
+}
+@media (max-width: 860px) {
+  .drawer { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; }
+  .sidebar { background: var(--glass-strong); }
+}
