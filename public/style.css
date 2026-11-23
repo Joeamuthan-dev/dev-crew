@@ -825,3 +825,22 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .role-editor textarea { font: 12.5px/1.5 var(--mono); }
 .role-editor .card-actions .grow { flex: 1; }
 .role-editor input[type=color] { height: 34px; padding: 2px; width: 100%; }
+
+/* Settings → Integrations: the list, the picker of starting points and the editor. */
+.int-list { list-style: none; padding: 0; margin: 8px 0 12px; display: grid; gap: 8px; }
+.int-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.int-row.off { opacity: .65; }
+.int-row .grow { flex: 1; min-width: 0; font-size: 13px; }
+.int-row .faint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.int-kind { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; align-self: flex-start; }
+.int-test { font-size: 12.5px; margin-top: 4px; white-space: normal; }
+.int-test:empty { display: none; }
+.int-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin: 8px 0 12px; }
+.int-preset { display: grid; gap: 4px; text-align: left; padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; font: inherit; color: var(--text); font-size: 12.5px; }
+.int-preset:hover { border-color: var(--accent); }
+.int-preset .int-kind { justify-self: start; }
+.int-editor { padding: 14px 16px; display: grid; gap: 10px; margin-bottom: 12px; }
+.int-editor .card-actions .grow { flex: 1; }
+.int-checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.kv-rows { display: grid; gap: 6px; }
+.kv-row { display: grid; grid-template-columns: minmax(120px, 1fr) 2fr; gap: 6px; }

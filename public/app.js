@@ -1280,6 +1280,7 @@ async function renderSettings(main) {
         <h4>Always refused</h4><div class="perm-list">${chips(d.permissions.denied)}</div>
         ${d.permissions.projects.some(p => p.extra.length) ? `<h4>Extra, per project</h4>${d.permissions.projects.filter(p => p.extra.length).map(p => `<div><b>${esc(p.name)}</b>: ${chips(p.extra)}</div>`).join('')}` : ''}`)}
 
+      ${sec('integrations', 'Your integrations', `<p class="hint">Connect more tools. A <b>tool</b> is an MCP server the agents can use (Azure DevOps, a database, a browser, your own); a <b>notification</b> tells Slack, Teams or any URL when tasks finish or need you. Each one can be limited to some projects and roles.</p><div id="intBox"><p class="faint">Loading…</p></div>`)}
       ${sec('integrations', 'Connections', `<p class="hint">What Dev Crew uses on this machine, and whether it works.</p>
         <ul class="checks" id="checkList"><li class="faint">Checking…</li></ul>
         <button type="button" class="btn sm" data-recheck>Check again</button>`)}
@@ -1332,6 +1333,7 @@ async function renderSettings(main) {
   };
   drawPerms();
   loadChecks();
+  loadIntegrations();
   loadBackups();
 
   const page = $('#settingsPage');
@@ -1513,6 +1515,181 @@ function openRoleEditor(data, id) {
   </div>`;
   $('#roleCards').querySelector(id ? '[name=r_name]' : '[name=r_id]').focus();
 }
+
+/* ---------------- Settings → Integrations: tools and notifications you add ---------------- */
+
+const intUi = { data: null };
+const SECRET = '__set__';
+
+async function loadIntegrations() {
+  const box = $('#intBox');
+  if (!box) return;
+  try { intUi.data = await api('/api/integrations'); } catch (e) { box.innerHTML = `<p class="err-inline">${esc(e.message)}</p>`; return; }
+  if (!$('#intBox')) return;
+  drawIntegrations();
+  if (!box.dataset.wired) { box.dataset.wired = '1'; box.addEventListener('click', onIntegrationClick); }
+}
+
+function drawIntegrations() {
+  const d = intUi.data;
+  const list = d.integrations;
+  const scopeText = i => `${i.projects === '*' ? 'every project' : (i.projects || []).map(id => (d.projects.find(p => p.id === id) || { name: id }).name).join(', ')}${i.type === 'mcp' ? ` · ${i.roles === '*' ? 'every role' : (i.roles || []).map(id => (d.roles.find(r => r.id === id) || { name: id }).name).join(', ')}${i.readOnlyTasks ? '' : ' · tasks that make changes'}` : ` · tells you when: ${(i.events || []).join(', ')}`}`;
+  $('#intBox').innerHTML = `${list.length ? `<ul class="int-list">${list.map(i => `<li class="int-row ${i.enabled === false ? 'off' : ''}">
+      <span class="int-kind">${i.type === 'mcp' ? 'Tool' : 'Notify'}</span>
+      <div class="grow"><b>${esc(i.name)}</b> ${i.enabled === false ? '<span class="pill">Off</span>' : ''}<div class="faint">${i.type === 'mcp' ? (i.transport === 'http' ? esc(i.url) : esc([i.command, ...(i.args || [])].join(' '))) : esc(i.format)} · ${esc(scopeText(i))}</div><div class="int-test" data-int-result="${esc(i.id)}"></div></div>
+      <button type="button" class="btn sm ghost" data-int-test="${esc(i.id)}">Test</button>
+      <button type="button" class="btn sm ghost" data-int-toggle="${esc(i.id)}">${i.enabled === false ? 'Turn on' : 'Turn off'}</button>
+      <button type="button" class="btn sm" data-int-edit="${esc(i.id)}">Edit</button>
+    </li>`).join('')}</ul>` : '<p class="faint">Nothing added yet.</p>'}
+    <button type="button" class="btn" data-int-add>+ Add integration</button>`;
+}
+
+function intPickerHtml() {
+  return `<div class="int-picker"><p class="hint">Pick a starting point; you can change everything on the next screen.</p>
+    <div class="int-presets">${intUi.data.presets.map(p => `<button type="button" class="int-preset" data-int-preset="${esc(p.key)}"><b>${esc(p.name)}</b><span class="int-kind">${p.type === 'mcp' ? 'Tool for agents' : 'Notification'}</span><span class="faint">${esc(p.about)}</span></button>`).join('')}</div>
+    <button type="button" class="btn ghost" data-int-cancel>Cancel</button></div>`;
+}
+
+const kvRows = (name, obj) => {
+  const rows = Object.entries(obj || {});
+  return `<div class="kv-rows" data-kv="${name}">${rows.map(([k, v]) => kvRow(k, v)).join('')}${kvRow('', '')}</div>
+    <button type="button" class="linkish" data-kv-add="${name}">+ Add another</button>`;
+};
+const kvRow = (k, v) => `<div class="kv-row"><input type="text" class="kv-k" placeholder="NAME" value="${esc(k)}"><input type="password" class="kv-v" autocomplete="off" placeholder="${v === SECRET ? 'saved: leave blank to keep' : 'value'}" value="${v === SECRET ? '' : esc(v)}" data-saved="${v === SECRET ? '1' : ''}"></div>`;
+
+function intEditorHtml(i) {
+  const d = intUi.data;
+  const isNew = !i.id;
+  const checks = (name, all, chosen) => `<div class="int-checks"><label class="check"><input type="checkbox" data-all="${name}" ${chosen === '*' || !chosen ? 'checked' : ''}> All</label>${all.map(x => `<label class="check"><input type="checkbox" name="${name}" value="${esc(x.id)}" ${Array.isArray(chosen) && chosen.includes(x.id) ? 'checked' : ''}> ${esc(x.name)}</label>`).join('')}</div>`;
+  const mcp = i.type === 'mcp';
+  return `<div class="int-editor card" data-int-id="${esc(i.id || '')}" data-int-type="${esc(i.type)}">
+    <div class="grid2">
+      <div class="field"><label>Name</label><input type="text" name="i_name" maxlength="60" value="${esc(i.name || '')}"></div>
+      ${mcp ? `<div class="field"><label>Connects with</label><select name="i_transport"><option value="stdio" ${i.transport !== 'http' ? 'selected' : ''}>A command on this machine</option><option value="http" ${i.transport === 'http' ? 'selected' : ''}>A URL (HTTP)</option></select></div>`
+        : `<div class="field"><label>Message format</label><select name="i_format">${[['slack', 'Slack'], ['teams', 'Microsoft Teams'], ['json', 'JSON']].map(([v, l]) => `<option value="${v}" ${i.format === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`}
+    </div>
+    ${mcp ? `<div class="int-stdio" ${i.transport === 'http' ? 'hidden' : ''}>
+        <div class="grid2"><div class="field"><label>Command</label><input type="text" name="i_command" value="${esc(i.command || '')}" placeholder="npx"></div>
+        <div class="field"><label>Arguments <span class="faint">(one per line)</span></label><textarea name="i_args" rows="3">${esc((i.args || []).join('\n'))}</textarea></div></div>
+        <div class="field"><label>Environment variables <span class="faint">(tokens and keys go here; stored in the local config, never shown again)</span></label>${kvRows('env', i.env)}</div>
+      </div>
+      <div class="int-http" ${i.transport === 'http' ? '' : 'hidden'}>
+        <div class="field"><label>URL</label><input type="text" name="i_url" value="${esc(i.url || '')}" placeholder="https://…"></div>
+        <div class="field"><label>Headers <span class="faint">(for example Authorization: Bearer …; stored, never shown again)</span></label>${kvRows('headers', i.headers)}</div>
+      </div>
+      <div class="field"><label>Only these tools <span class="faint">(optional, comma-separated; blank allows every tool the server offers)</span></label><input type="text" name="i_tools" value="${esc((i.tools || []).join(', '))}"></div>
+      <div class="field"><label>Notes for the agents <span class="faint">(optional: when and how to use it)</span></label><textarea name="i_notes" rows="2" maxlength="1500" placeholder="e.g. Our Azure DevOps project is DataEz; link work items as AB#123 in commit messages.">${esc(i.notes || '')}</textarea></div>
+      <div class="field"><label>Roles that get it</label>${checks('i_roles', d.roles, i.roles)}</div>
+      <label class="check"><input type="checkbox" name="i_readonly" ${i.readOnlyTasks ? 'checked' : ''}> Also in read-only tasks (investigations, reviews). Leave off for tools that can change things.</label>`
+    : `<div class="field"><label>Webhook URL <span class="faint">(stored, never shown again)</span></label><input type="password" name="i_url" autocomplete="off" value="${i.url && i.url !== SECRET ? esc(i.url) : ''}" placeholder="${i.url === SECRET ? 'saved: leave blank to keep' : 'https://…'}"></div>
+      <div class="field"><label>Tell me when</label><div class="int-checks">${[['review', 'A branch is ready for review'], ['plan', 'A plan is ready to start'], ['failed', 'A task failed or stopped'], ['done', 'Any task finished']].map(([v, l]) => `<label class="check"><input type="checkbox" name="i_events" value="${v}" ${(i.events || ['review', 'failed', 'plan']).includes(v) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>`}
+    <div class="field"><label>Projects</label>${checks('i_projects', d.projects, i.projects)}</div>
+    <label class="check"><input type="checkbox" name="i_enabled" ${i.enabled === false ? '' : 'checked'}> On</label>
+    <div class="int-test" data-int-result="__editor"></div>
+    <div class="card-actions">
+      <button type="button" class="btn primary" data-int-save>${isNew ? 'Add integration' : 'Save'}</button>
+      <button type="button" class="btn" data-int-test-form>Test</button>
+      <button type="button" class="btn ghost" data-int-cancel>Cancel</button>
+      <span class="grow"></span>
+      ${isNew ? '' : `<button type="button" class="btn ghost danger" data-int-remove="${esc(i.id)}">Remove</button>`}
+    </div>
+    ${mcp ? '<p class="hint">Agents can use every tool you allow here, on the systems it reaches. Prefer read-only access, test systems and tokens with few rights.</p>' : ''}
+  </div>`;
+}
+
+/** Read the editor into the shape the server expects. */
+function intFormFromEditor(box) {
+  const v = n => (box.querySelector(`[name=${n}]`) || {}).value;
+  const picked = n => (box.querySelector(`[data-all=${n}]`) || {}).checked ? [] : [...box.querySelectorAll(`[name=${n}]:checked`)].map(x => x.value);
+  const kv = name => [...box.querySelectorAll(`[data-kv=${name}] .kv-row`)].map(r => ({ key: r.querySelector('.kv-k').value.trim(), value: r.querySelector('.kv-v').value || (r.querySelector('.kv-v').dataset.saved ? SECRET : '') })).filter(p => p.key);
+  const type = box.dataset.intType;
+  const form = { type, name: v('i_name'), projects: picked('i_projects'), enabled: box.querySelector('[name=i_enabled]').checked };
+  if (type === 'mcp') {
+    Object.assign(form, { transport: v('i_transport'), command: v('i_command'), args: v('i_args'), env: kv('env'), url: v('i_url'), headers: kv('headers'), tools: v('i_tools'), notes: v('i_notes'), roles: picked('i_roles'), readOnlyTasks: box.querySelector('[name=i_readonly]').checked });
+  } else {
+    Object.assign(form, { format: v('i_format'), url: v('i_url') || (box.dataset.intId ? SECRET : ''), events: [...box.querySelectorAll('[name=i_events]:checked')].map(x => x.value) });
+  }
+  return form;
+}
+
+function showIntResult(key, r) {
+  const el = document.querySelector(`[data-int-result="${key}"]`);
+  if (!el) return;
+  el.className = `int-test ${r.ok ? 'ok-text' : 'err-inline'}`;
+  el.textContent = r.ok ? `${r.detail}${r.tools && r.tools.length ? `: ${r.tools.slice(0, 30).join(', ')}${r.tools.length > 30 ? ' …' : ''}` : ''}` : `Not working: ${r.detail || r.error}`;
+}
+
+async function onIntegrationClick(e) {
+  const t = e.target;
+  const box = t.closest('.int-editor');
+  if (t.closest('[data-int-add]')) { $('#intBox').innerHTML = intPickerHtml(); return; }
+  if (t.closest('[data-int-cancel]')) { drawIntegrations(); return; }
+  const pr = t.closest('[data-int-preset]');
+  if (pr) {
+    const p = intUi.data.presets.find(x => x.key === pr.dataset.intPreset);
+    $('#intBox').innerHTML = intEditorHtml({ ...p, id: '', projects: '*', roles: '*', enabled: true });
+    return;
+  }
+  const ed = t.closest('[data-int-edit]');
+  if (ed) { $('#intBox').innerHTML = intEditorHtml(intUi.data.integrations.find(i => i.id === ed.dataset.intEdit)); return; }
+  const ka = t.closest('[data-kv-add]');
+  if (ka) { box.querySelector(`[data-kv=${ka.dataset.kvAdd}]`).insertAdjacentHTML('beforeend', kvRow('', '')); return; }
+  const tg = t.closest('[data-int-toggle]');
+  if (tg) {
+    const i = intUi.data.integrations.find(x => x.id === tg.dataset.intToggle);
+    try { const r = await api(`/api/integrations/${encodeURIComponent(i.id)}`, { method: 'PUT', body: { ...i, enabled: i.enabled === false } }); intUi.data.integrations = r.integrations; drawIntegrations(); toast(i.enabled === false ? `${i.name} is on` : `${i.name} is off`); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
+  const ts = t.closest('[data-int-test]');
+  if (ts) {
+    const i = intUi.data.integrations.find(x => x.id === ts.dataset.intTest);
+    ts.disabled = true;
+    showIntResult(i.id, { ok: true, detail: 'Testing… (starting a server can take up to a minute)' });
+    try { showIntResult(i.id, await api('/api/integrations/test', { method: 'POST', body: { form: i, id: i.id } })); }
+    catch (err) { showIntResult(i.id, { ok: false, detail: err.message }); }
+    ts.disabled = false;
+    return;
+  }
+  if (t.closest('[data-int-test-form]')) {
+    const btn = t.closest('[data-int-test-form]');
+    btn.disabled = true;
+    showIntResult('__editor', { ok: true, detail: 'Testing… (starting a server can take up to a minute)' });
+    try { showIntResult('__editor', await api('/api/integrations/test', { method: 'POST', body: { form: intFormFromEditor(box), id: box.dataset.intId || '' } })); }
+    catch (err) { showIntResult('__editor', { ok: false, detail: err.message }); }
+    btn.disabled = false;
+    return;
+  }
+  if (t.closest('[data-int-save]')) {
+    const id = box.dataset.intId;
+    try {
+      const r = await api(`/api/integrations/${id ? encodeURIComponent(id) : '_new'}`, { method: 'PUT', body: intFormFromEditor(box) });
+      intUi.data.integrations = r.integrations;
+      drawIntegrations();
+      toast(id ? 'Integration saved' : 'Integration added');
+    } catch (err) { showIntResult('__editor', { ok: false, detail: err.message }); }
+    return;
+  }
+  const rm = t.closest('[data-int-remove]');
+  if (rm) {
+    const i = intUi.data.integrations.find(x => x.id === rm.dataset.intRemove);
+    if (!confirm(`Remove ${i.name}? Agents stop getting it straight away; its saved secrets are deleted from the config.`)) return;
+    try { const r = await api(`/api/integrations/${encodeURIComponent(i.id)}`, { method: 'DELETE' }); intUi.data.integrations = r.integrations; drawIntegrations(); toast(`${i.name} removed`); }
+    catch (err) { toast(err.message, true); }
+  }
+}
+
+// the editor's small dynamics: transport switch, and "All" versus single checkboxes
+document.addEventListener('change', e => {
+  const box = e.target.closest && e.target.closest('.int-editor');
+  if (!box) return;
+  if (e.target.name === 'i_transport') {
+    box.querySelector('.int-stdio').hidden = e.target.value === 'http';
+    box.querySelector('.int-http').hidden = e.target.value !== 'http';
+  }
+  if (e.target.dataset.all && e.target.checked) box.querySelectorAll(`[name=${e.target.dataset.all}]`).forEach(c => { c.checked = false; });
+  if (/^i_(projects|roles)$/.test(e.target.name) && e.target.checked) { const all = box.querySelector(`[data-all=${e.target.name}]`); if (all) all.checked = false; }
+});
 
 /* ---------------- project editor (add / edit) ---------------- */
 
@@ -2566,4 +2743,9 @@ setInterval(() => { if (S) schedule(); }, 30000); // keep "5m ago" honest
 
 load().then(connect).catch(e => {
   $('#main').innerHTML = `<div class="notice"><b>Could not reach the Dev Crew server.</b> ${esc(e.message)}</div>`;
+});
+
+// Enter inside the integration editor must not submit the whole Settings form.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.closest && e.target.closest('.int-editor') && e.target.tagName === 'INPUT') e.preventDefault();
 });

@@ -22,7 +22,8 @@ import { planHousekeeping, planSummary, planIsEmpty } from './lib/housekeeping.m
 import { gatherFacts, runPlan, clearTmp, canonical } from './lib/cleanup.mjs';
 import { detectProject, findRepos } from './lib/detect.mjs';
 import { refusedCommands, mergeRefused, ruleProblem } from './lib/permissions.mjs';
-import { findGraph, graphDigest, graphPromptBlock, writeMcpConfig, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
+import { findGraph, graphDigest, graphPromptBlock, graphifyMcpCommand, graphToolRules, graphStats, graphUpdateDue, graphifyCommand, GRAPH_UPDATE_MODES } from './lib/graph.mjs';
+import { INTEGRATION_PRESETS, cleanIntegration, maskIntegrations, toolsFor, mcpFor, integrationsPromptBlock, webhooksFor, webhookBody, sendWebhook, testStdio, testHttp, writeMcpServers } from './lib/integrations.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -267,7 +268,7 @@ function graphContext(p, repo, t, tmpDir) {
   if (mode === 'summary' && g.report) {
     out.block = graphPromptBlock('summary', { digest: graphDigest(fs.readFileSync(g.report, 'utf8')), builtAt: g.builtAt });
   } else if (mode === 'tools' && g.graph) {
-    out.mcp = writeMcpConfig(g.graph, tmpDir);
+    out.servers = { graphify: { type: 'stdio', command: graphifyMcpCommand(), args: [g.graph] } };
     out.tools = graphToolRules();
     out.block = graphPromptBlock('tools', { builtAt: g.builtAt });
   }
@@ -430,14 +431,20 @@ async function execTask(t, handle) {
       log(t.id, 'warn', 'This Claude Code version has no --max-budget-usd, so the per-task cost limit cannot be enforced. Update with: claude update');
     }
     const graphCtx = graphContext(p, repo, t, TMP);
+    // tools from Settings → Integrations that this project, role and kind of task may use
+    const intTools = toolsFor(cfg.settings.integrations, { projectId: p.id, role: t.role, mode: t.mode });
+    const intMcp = mcpFor(intTools);
+    const servers = { ...(graphCtx.servers || {}), ...intMcp.servers };
+    const mcpFile = Object.keys(servers).length ? writeMcpServers(servers, TMP) : '';
+    if (intTools.length) log(t.id, 'sys', `Connected tools: ${intTools.map(i => i.name).join(', ')}`);
     const run = runClaude({
       command: cfg.settings.claudeCommand,
       cwd,
       prompt,
-      mcpConfig: graphCtx.mcp,
-      extraTools: graphCtx.tools,
+      mcpConfig: mcpFile,
+      extraTools: [...graphCtx.tools, ...intMcp.rules],
       systemPrompt: taskSystemPrompt(p, t.role, t.mode, {
-        graph: graphCtx.block,
+        graph: [graphCtx.block, integrationsPromptBlock(intTools)].filter(Boolean).join('\n\n'),
         cwd, branch: t.branch, base: t.base, readFrom,
         prev: prev ? { role: prev.role, title: prev.title, branch: prev.branch, summary: prev.summary } : null,
         // a plan step's next steps are the plan's own, so it proposes no handoffs of its own
@@ -466,7 +473,7 @@ async function execTask(t, handle) {
     const unwatch = watchTimeout(t, limits, handle);
     const res = await run.done.finally(() => {
       unwatch();
-      if (graphCtx.mcp) fs.rmSync(graphCtx.mcp, { force: true });
+      if (mcpFile) fs.rmSync(mcpFile, { force: true });
     });
     if (res.budgetHit) handle.limitHit = 'budget';
 
@@ -527,6 +534,30 @@ async function execTask(t, handle) {
   }
   t.endedAt = Date.now();
   touchTask(t);
+  notifyWebhooks(t);
+}
+
+/** Tell the webhooks in Settings → Integrations that a task finished, failed or needs you. */
+function notifyWebhooks(t) {
+  const list = cfg.settings.integrations || [];
+  if (!list.some(i => i.type === 'webhook' && i.enabled !== false)) return;
+  let events;
+  if (t.status === 'done') {
+    events = ['done'];
+    if (t.mode === 'change' && t.git && t.git.commits.length) events.unshift('review');
+    if (t.plan && t.plan.status === 'proposed') events.unshift('plan');
+  } else if (t.status === 'failed' || t.status === 'stopped') events = ['failed'];
+  else return;
+  const p = project(t.projectId);
+  const sent = new Set();
+  for (const ev of events) {
+    for (const w of webhooksFor(list, ev, t.projectId)) {
+      if (sent.has(w.id)) continue; // one message per webhook, worded for the most specific event
+      sent.add(w.id);
+      const body = webhookBody(w.format, { event: ev, task: t, projectName: p ? p.name : t.projectId, roleName: roleName(t.role), link: `http://localhost:${LISTEN_PORT}/#/p/${t.projectId}/tasks` });
+      sendWebhook(w, body).then(r => log(t.id, r.ok ? 'sys' : 'warn', r.ok ? `Told ${w.name}` : `Could not tell ${w.name}: ${r.error}`));
+    }
+  }
 }
 
 async function execReport(r, handle) {
@@ -1387,6 +1418,42 @@ async function route(req, res, url) {
     cfg = loadConfig();
     emit('reload', {});
     return send(res, 200, { ok: true, roles: ROLES });
+  }
+
+  /* ----- Settings: integrations you add (tools for agents, notifications) ----- */
+  if (m === 'GET' && url.pathname === '/api/integrations') {
+    return send(res, 200, { integrations: maskIntegrations(cfg.settings.integrations), presets: INTEGRATION_PRESETS, projects: cfg.projects.map(p => ({ id: p.id, name: p.name })), roles: ROLES.map(r => ({ id: r.id, name: r.name })) });
+  }
+  // POST /api/integrations/test {form, id}: try it before (or after) saving
+  if (m === 'POST' && url.pathname === '/api/integrations/test') {
+    const { form, id } = await readBody(req);
+    const existing = id ? (cfg.settings.integrations || []).find(i => i.id === id) : null;
+    const { integration: i, errors } = cleanIntegration(form, existing, []);
+    if (errors.length) return send(res, 400, { error: errors.join(' ') });
+    if (i.type === 'webhook') {
+      const r = await sendWebhook(i, webhookBody(i.format, { event: 'done', task: { id: 'test', title: 'Test message from Dev Crew', status: 'done', summary: 'If you can read this, the integration works.' }, projectName: 'Dev Crew', roleName: 'Dev Crew' }));
+      return send(res, 200, { ok: r.ok, detail: r.ok ? 'Test message sent.' : r.error });
+    }
+    const r = i.transport === 'http' ? await testHttp(i) : await testStdio(i);
+    return send(res, 200, { ok: r.ok, tools: r.tools, detail: r.ok ? `Connected: ${r.tools.length} tool${r.tools.length === 1 ? '' : 's'}` : r.error });
+  }
+  // PUT /api/integrations/:id (or _new) saves one; DELETE removes it
+  if (parts[1] === 'integrations' && parts[2] && parts[2] !== 'test' && (m === 'PUT' || m === 'DELETE')) {
+    const raw = readRaw();
+    const list = Array.isArray((raw.settings || {}).integrations) ? raw.settings.integrations : [];
+    const existing = parts[2] === '_new' ? null : list.find(i => i.id === parts[2]);
+    if (parts[2] !== '_new' && !existing) return send(res, 404, { error: 'No such integration.' });
+    let next;
+    if (m === 'DELETE') next = list.filter(i => i.id !== parts[2]);
+    else {
+      const { integration, errors } = cleanIntegration(await readBody(req), existing, list.map(i => i.id));
+      if (errors.length) return send(res, 400, { error: errors.join(' ') });
+      next = existing ? list.map(i => (i.id === existing.id ? integration : i)) : [...list, integration];
+    }
+    writeRaw({ ...raw, settings: { ...(raw.settings || {}), integrations: next } });
+    cfg = loadConfig();
+    emit('reload', {});
+    return send(res, 200, { ok: true, integrations: maskIntegrations(cfg.settings.integrations) });
   }
 
   /* ----- Settings: integrations ----- */

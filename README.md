@@ -333,7 +333,27 @@ previous version kept) and applies straight away; only a new port needs a restar
   never be allowed.
 - **Integrations:** a status light for Claude Code, Git, the GitHub CLI (and whether it is signed
   in), monday.com (and whether the token works) and graphify, with **Check again**; the monday.com
-  token and API version.
+  token and API version; and **your integrations** (below).
+
+### Adding integrations
+
+Settings → Integrations → **+ Add integration** connects a new tool. Pick a starting point (Azure
+DevOps, GitHub, a Playwright browser, PostgreSQL read-only, Slack, Microsoft Teams, a JSON webhook,
+or a custom MCP server started by a command or reached by URL), then adjust it:
+
+- **Tools for agents** (MCP servers): the command and arguments or the URL, environment variables or
+  headers for tokens, the tools allowed (blank allows all), notes for the agents (when and how to use
+  it), which roles and projects get it, and whether read-only tasks (investigations, reviews) get it
+  too. Agents are told which tools they have; each run gets only the ones for its project, role and
+  kind of task. On Windows, `npx`-style servers are started through `cmd /c`.
+- **Notifications** (webhooks): Slack, Teams or JSON; tell you when a branch is ready for review, a
+  plan is ready, a task failed or stopped, or any task finished. Plain `http://` is allowed only for
+  localhost.
+- **Test** starts the server and lists its tools (or sends a test message) before or after saving.
+  **Turn off** keeps it without using it. Tokens, headers and webhook URLs are stored in the local
+  config and never sent back to the browser.
+
+Tools reach real systems: prefer read-only access, test systems and tokens with few rights.
 - **Appearance:** theme, motion, 3D quality, and the simple 2D office.
 - **Advanced:** port, workspace folder, Claude command, permission mode, strict MCP, passing a
   parent Claude session's variables through; the list of backups with **Restore**, and **Export** /
@@ -412,6 +432,7 @@ server.mjs          queue, scheduler, API, live events
 lib/roles.mjs       the built-in roles, custom roles from the config
 lib/review.mjs      the Code Reviewer's verdict and findings, and posting them with gh
 lib/graph.mjs       knowledge-graph context from graphify (digest or graph tools)
+lib/integrations.mjs  tools and notifications added in Settings (MCP servers, webhooks)
 scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
