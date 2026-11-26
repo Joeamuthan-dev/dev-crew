@@ -185,6 +185,7 @@ function statusPill(t) {
   if (t.status === 'done' && t.noChanges) return '<span class="pill amber" title="Finished without a single commit">No changes</span>';
   if (t.status === 'done' && t.origin !== 'plan' && (t.handoffs || []).some(h => h.status === 'proposed')) return '<span class="pill amber">Handoff</span>';
   if (t.status === 'done' && t.plan && t.plan.status === 'proposed') return '<span class="pill amber">Plan ready</span>';
+  if (t.lead && t.status === 'done' && !t.lead.result) return t.lead.state === 'stuck' ? '<span class="pill amber">Needs you</span>' : '<span class="pill blue">Crew working</span>';
   if (t.status === 'cancelled') return '<span class="pill">Cancelled</span>';
   if (needsReview(t)) return '<span class="pill amber">Review</span>';
   return '<span class="pill green">Done</span>';
@@ -2287,7 +2288,7 @@ function refreshDrawer(first) {
         ${g.files ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Files</summary><div class="commits">${esc(g.files)}</div></details>` : ''}
       </div>${cmds.map(([label, c]) => `<div style="font-size:12px;color:var(--faint);margin-top:8px">${label}</div><div class="cmd"><span>${esc(c)}</span><button class="btn sm ghost" data-copy="${esc(c)}">Copy</button></div>`).join('')}</div>` : ''}
     ${workflowHtml(t)}${checksHtml(t)}${noChangesHtml(t)}${refusedHtml(t)}${reviewHtml(t)}${mergeHtml(t, repo)}${reviewAsk(t)}
-    ${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
+    ${leadHtml(t)}${handoffsHtml(t)}${planHtml(t)}${chainHtml(t)}
     ${t.result ? `<div class="d-section"><h4>Report</h4>${md(t.review && t.review.result ? t.result.replace(/\n##\s*Review\s*\n[\s\S]*$/i, '') : t.result)}</div>` : ''}
     ${(t.history || []).length > 1 ? `<div class="d-section"><h4>Earlier turns</h4>${t.history.slice(0, -1).map(h => `<details class="box" style="margin-bottom:6px"><summary style="cursor:pointer">${esc(h.prompt.slice(0, 120))} · ${ago(h.at)}</summary>${md(h.result)}</details>`).join('')}</div>` : ''}`;
 
@@ -2471,6 +2472,34 @@ function handoffsHtml(t) {
     ${list.map(card).join('')}</div>`;
 }
 
+/** A ticket led by one agent: where it stands and, at the end, the branch per repo. */
+function leadHtml(t) {
+  const L = t.lead;
+  if (!L) return '';
+  const name = esc(roleOf(t.role).name);
+  const head = `<h4>${L.practice ? 'Practice run' : 'Led ticket'}</h4>`;
+  const res = L.result;
+  if (!res) {
+    const kids = S.tasks.filter(x => x.leadId === t.id);
+    const open = kids.filter(x => x.status === 'queued' || x.status === 'running').length;
+    const line = L.state === 'stuck' ? `<p class="step-warn">Waiting for you: ${esc(L.why || 'a step needs you')}</p>`
+      : L.state === 'working' || (kids.length && open) ? `<p class="hint">The crew is working: ${kids.length - open} of ${kids.length} task(s) finished. Parallel branches are merged and reviewed before the ticket is done.</p>`
+        : `<p class="hint">The ${name} is reviewing the ticket and the code, then splits the work across the crew. The plan starts on its own.</p>`;
+    return `<div class="d-section">${head}${line}</div>`;
+  }
+  const verdict = v => v === 'approve' ? '<span class="pill green">Approved</span>' : v === 'request_changes' ? '<span class="pill red">Changes requested</span>' : v ? `<span class="pill">${esc(v)}</span>` : '<span class="pill">Not reviewed</span>';
+  const rows = res.finals.map(r => `<li><b>${esc(r.repo)}</b> · <code>${esc(r.branch)}</code>${L.practice ? ' <span class="faint">(deleted)</span>' : ''}
+      <span class="faint">from ${esc(r.base || '?')} · ${esc(r.shortstat || 'no changes')}</span>
+      ${r.checked ? (r.checksOk ? '<span class="pill green">Checks passed</span>' : '<span class="pill red">Checks failed</span>') : ''} ${verdict(r.verdict)}
+      <button class="btn sm ghost" data-task="${r.taskId}">Open</button>${r.reviewId ? ` <button class="btn sm ghost" data-task="${r.reviewId}">See review</button>` : ''}
+      ${r.files ? `<pre class="mini">${esc(r.files)}</pre>` : ''}
+      ${r.diff ? `<details><summary>The change itself</summary><pre class="mini">${esc(r.diff)}</pre></details>` : ''}</li>`).join('');
+  const sum = L.practice
+    ? `Practice finished: the branches were deleted. The crew kept ${res.lessons} lesson(s) about the project, used by every later run (Lessons tab).`
+    : res.finals.length ? `Done. ${res.finals.length === 1 ? 'This branch holds' : 'These branches hold'} the whole ticket. Nothing was pushed: review, then push it yourself. ${res.lessons} lesson(s) learned.` : 'Done, but no step changed any code.';
+  return `<div class="d-section">${head}<p class="hint">${sum} Cost ${(res.cost || 0).toFixed(2)}.</p><ul class="lead-finals">${rows}</ul></div>`;
+}
+
 function planHtml(t) {
   if (!t.plan) return '';
   const steps = t.plan.steps;
@@ -2575,6 +2604,8 @@ function openAssign(pre = {}) {
       <div class="field"><label>Project</label>
         <select name="projectId">${S.projects.map(p => `<option value="${p.id}" ${p.id === projectId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <label class="check plan-first"><input type="checkbox" name="plan"> <span><b>Plan it first</b> · the Solutions Architect breaks this feature into linked tasks for the crew. You review the plan, then start it.</span></label>
+      <label class="check plan-first"><input type="checkbox" name="lead"> <span><b>Lead it</b> · the agent you pick reviews the ticket and the code, splits the work across the crew by role and starts it straight away. Parallel branches are merged into one, checked and reviewed. Nothing is pushed: you get one branch per repo.</span></label>
+      <label class="check plan-first lead-only"><input type="checkbox" name="practice"> <span><b>Practice run</b> · do it all for real, then delete the branches. The crew keeps only what it learned about the project (Lessons tab).</span></label>
       <div class="field not-planning"><label>Who</label>
         <div class="role-pick" id="rolePick">${rolePick(projectId, role)}</div></div>
       <div class="field not-planning mode-field"><label>Kind of task</label>
@@ -2747,6 +2778,16 @@ function openAssign(pre = {}) {
     markStale();
     fillLimits();
   });
+  // "Lead it": the picked agent plans and starts the work; "Plan it first" and leading exclude each other.
+  F.lead.addEventListener('change', () => {
+    const on = F.lead.checked;
+    if (on && F.plan.checked) { F.plan.checked = false; F.plan.dispatchEvent(new Event('change')); }
+    form.classList.toggle('leading', on);
+    if (on) form.querySelector('input[name=mode][value=analyze]').checked = true;
+    if (!on) F.practice.checked = false;
+    fillRepos(); markStale(); fillLimits();
+  });
+  F.plan.addEventListener('change', () => { if (F.plan.checked && F.lead.checked) { F.lead.checked = false; form.classList.remove('leading'); F.practice.checked = false; } });
   F.title.addEventListener('input', markStale);
   F.details.addEventListener('input', markStale);
   F.budgetUsd.addEventListener('input', () => { limitsTouched = true; checkLimitFit(lastEst); });
@@ -2782,7 +2823,7 @@ function openAssign(pre = {}) {
     btn.disabled = true;
     try {
       await api('/api/tasks', { method: 'POST', body });
-      toast(`Assigned to ${roleOf(body.role).name}`);
+      toast(body.lead ? `${roleOf(body.role).name} is leading it${body.practice ? ' (practice run)' : ''}` : `Assigned to ${roleOf(body.role).name}`);
       if (F.more.checked) { F.title.value = ''; F.details.value = ''; markStale(); F.title.focus(); }
       else dlg.close();
     } catch (err) {

@@ -29,6 +29,7 @@ import { findGraph, graphDigest, graphPromptBlock, graphifyMcpCommand, graphTool
 import { INTEGRATION_PRESETS, cleanIntegration, maskIntegrations, toolsFor, mcpFor, integrationsPromptBlock, webhooksFor, webhookBody, sendWebhook, testStdio, testHttp, writeMcpServers } from './lib/integrations.mjs';
 import { showToast, toastSupported, createActionLinks } from './lib/toast.mjs';
 import { detectAlerts } from './public/alerts.js';
+import { leadState, leadTree, startOf, leadPromptBlock } from './lib/lead.mjs';
 import { readRaw, writeRaw, projectFromForm, upsertProject, removeProject, peopleFromForm } from './lib/configfile.mjs';
 
 const DATA = path.join(ROOT, 'data');
@@ -476,6 +477,8 @@ async function execTask(t, handle) {
         // a plan step's next steps are the plan's own, so it proposes no handoffs of its own
         handoffs: (t.chainDepth || 0) >= MAX_CHAIN_DEPTH || (kind === 'review' && t.review) || t.origin === 'plan' ? 'off' : policyFor(p),
         plan: !!t.planTask,
+        lead: t.lead ? leadPromptBlock({ practice: !!t.lead.practice, roleName: roleName(t.role) }) : '',
+        practice: !!(t.leadId && (taskById(t.leadId) || {}).lead && taskById(t.leadId).lead.practice),
         review: t.review, mergeTarget: t.mergeTarget, mergeTargets: t.mergeTargets,
         // the project's quality bar, what the checks said about a reviewed branch, and lessons
         quality: p.quality, stack: p.stack,
@@ -594,6 +597,7 @@ async function execTask(t, handle) {
   touchTask(t);
   notifyWebhooks(t);
   notifyDesktop(t, refusedBefore);
+  checkLead(t);
 }
 
 /* ---------------- Windows notifications from the server (no browser needed) ---------------- */
@@ -972,7 +976,7 @@ function afterDone(t, p) {
     title: `Review: ${t.title}`.slice(0, 200),
     details: `Automatic review of the ${roleName(t.role)}'s branch, which passed the project's checks.\n\nTheir task was:\n${t.title}${t.details ? `\n${t.details}` : ''}`.slice(0, 8000),
     review: { branch: t.branch, base: t.base, prNumber: '' },
-    parentId: t.id, prevId: t.id, dependsOn: [t.id], chainDepth: (t.chainDepth || 0) + 1, origin: 'auto-review',
+    parentId: t.id, prevId: t.id, dependsOn: [t.id], chainDepth: (t.chainDepth || 0) + 1, origin: 'auto-review', leadId: t.leadId || '',
   }, { deferPump: true });
   t.autoReviewId = child.id;
   t.reviewedCommits = t.git.commits.length;
@@ -1019,6 +1023,73 @@ function learnFrom(t, p, result) {
   store.save();
 }
 
+/** After any run of a lead ticket's tasks: update where the ticket stands, and finish it once. */
+function checkLead(t) {
+  const root = t.lead ? t : t.leadId ? taskById(t.leadId) : null;
+  if (!root || !root.lead || root.lead.result || root.lead.finishing) return;
+  const st = leadState(root, S.tasks);
+  if (!st) return;
+  const was = root.lead.state;
+  Object.assign(root.lead, { state: st.state, why: st.why || '' });
+  if (st.state === 'stuck' && was !== 'stuck') log(root.id, 'warn', `The ticket is waiting for you: ${st.why}`);
+  if (st.state === 'done') {
+    root.lead.finishing = true;
+    finishLead(root, st.finals).catch(e => log(root.id, 'err', `Could not finish the ticket: ${e.message}`))
+      .finally(() => { delete root.lead.finishing; touchTask(root); });
+    return;
+  }
+  if (was !== st.state) touchTask(root);
+}
+
+/**
+ * The ticket is done: record each repo's final branch (what it changed, its checks and review).
+ * A practice run then removes every worktree and branch it made; only the lessons stay.
+ */
+async function finishLead(root, finalIds) {
+  const p = project(root.projectId);
+  const tree = leadTree(root.id, S.tasks);
+  const practice = !!root.lead.practice;
+  const finals = [];
+  for (const f of finalIds.map(taskById).filter(Boolean)) {
+    const repo = p.repos.find(r => r.name === f.repo);
+    const start = startOf(tree, f.repo);
+    // newest first: the latest review of the final branch
+    const review = tree.find(x => x.review && x.review.branch === f.branch && x.review.result);
+    const row = {
+      taskId: f.id, repo: f.repo, branch: f.branch, base: start ? start.base : f.base, shortstat: '', files: '', diff: '',
+      checksOk: !failedChecks(f.checks).length, checked: (f.checks || []).length > 0,
+      verdict: review ? review.review.result.verdict : '', reviewId: review ? review.id : '',
+    };
+    if (repo && start) {
+      row.shortstat = (await G.git(repo.path, ['diff', '--shortstat', start.sha, f.branch], { allowFail: true })).trim();
+      row.files = (await G.git(repo.path, ['diff', '--stat=120', start.sha, f.branch], { allowFail: true })).split('\n').slice(0, 60).join('\n');
+      // a practice run's branches are deleted, so keep the change itself to read afterwards
+      if (practice) row.diff = (await G.git(repo.path, ['diff', start.sha, f.branch], { allowFail: true })).slice(0, 120000);
+    }
+    finals.push(row);
+  }
+  const ids = new Set([root.id, ...tree.map(x => x.id)]);
+  const lessons = Object.values(S.lessons || {}).flat().filter(l => l && ids.has(l.taskId)).length;
+  root.lead.result = { at: Date.now(), finals, lessons, cost: tree.reduce((n, x) => n + (x.costUsd || 0), root.costUsd || 0) };
+  if (practice) {
+    let removed = 0;
+    for (const x of tree.filter(x => x.mode === 'change' && x.branch)) {
+      const repo = p.repos.find(r => r.name === x.repo);
+      if (!repo) continue;
+      if (x.worktree && !x.cleaned) { await G.removeWorktree(repo.path, x.worktree).catch(() => {}); x.cleaned = true; }
+      await G.git(repo.path, ['branch', '-D', x.branch], { allowFail: true });
+      x.branchDeleted = true;
+      removed++;
+      touchTask(x);
+    }
+    log(root.id, 'sys', `Practice run finished: ${removed} branch(es) and their worktrees removed. The crew kept ${lessons} lesson(s) about the project.`);
+  } else {
+    log(root.id, 'sys', finals.length
+      ? `Ticket done: ${finals.map(r => `${r.branch} in ${r.repo}`).join(', ')} hold${finals.length === 1 ? 's' : ''} the whole change, ready for you to review and push.`
+      : 'Ticket done, but no step changed any code.');
+  }
+}
+
 /** Start one proposed handoff: a new task that builds on its parent. */
 function startHandoff(parent, h) {
   const p = project(parent.projectId);
@@ -1026,7 +1097,7 @@ function startHandoff(parent, h) {
   const child = createTaskFromSpec({
     projectId: parent.projectId, role: h.role, mode: h.mode, repo: followRepo(p, h, parent),
     title: h.title, details: [h.details, h.reason ? `Why now: ${h.reason}` : ''].filter(Boolean).join('\n\n'),
-    parentId: parent.id, prevId: parent.id, dependsOn: [parent.id], chainDepth: (parent.chainDepth || 0) + 1, origin: 'handoff',
+    parentId: parent.id, prevId: parent.id, dependsOn: [parent.id], chainDepth: (parent.chainDepth || 0) + 1, origin: 'handoff', leadId: parent.leadId || '',
   });
   Object.assign(h, { status: 'started', taskId: child.id });
   log(parent.id, 'sys', `Handed off to the ${roleName(h.role)}: "${h.title}"`);
@@ -1059,7 +1130,7 @@ function startPlan(planTask) {
     const child = createTaskFromSpec({
       projectId: planTask.projectId, role: s.role, mode: s.mode, repo, title: s.title, details: s.details,
       parentId: planTask.id, prevId: prev.id, dependsOn: deps.length ? deps : [planTask.id],
-      chainDepth: (planTask.chainDepth || 0) + 1, origin: 'plan', planKey: s.key,
+      chainDepth: (planTask.chainDepth || 0) + 1, origin: 'plan', planKey: s.key, leadId: planTask.lead ? planTask.id : planTask.leadId || '',
       mergeFrom: s.integrate ? (s.mergeIn || []).map(k => idByKey[k]).filter(Boolean) : [],
     }, { deferPump: true });
     idByKey[s.key] = child.id;
@@ -1084,7 +1155,8 @@ function takeNextSteps(t, p, result) {
     const steps = integratePlan(parsePlan(result, { roleIds, repoNames: p ? p.repos.map(r => r.name) : null }), { mergeRole: mergeRoleOf(p) });
     if (!steps.length) { log(t.id, 'warn', 'The plan had no usable steps.'); return; }
     t.plan = { steps, status: 'proposed' };
-    if (policy === 'auto') {
+    // a lead ticket's plan starts on its own: that is what the owner asked for
+    if (policy === 'auto' || t.lead) {
       try { startPlan(t); } catch (e) { t.plan.status = 'proposed'; log(t.id, 'warn', `Could not start the plan: ${e.message}`); }
     }
     return;
@@ -1108,8 +1180,12 @@ async function createTask(b) {
   const p = project(b.projectId);
   if (!p) throw new Error('Unknown project.');
   if (!roleById(b.role)) throw new Error('Unknown role.');
-  const plan = b.plan === true || b.plan === 'on' || b.plan === 'true';
-  if (!plan && !p.activeRoles.includes(b.role)) throw new Error(`${p.name} has no ${roleName(b.role)}. Turn the role on in the project's settings first.`);
+  const on = v => v === true || v === 'on' || v === 'true';
+  // "Lead it": the agent you pick plans the ticket, splits it by role and starts the plan itself
+  const lead = on(b.lead);
+  const plan = on(b.plan) || lead;
+  if (lead && ['review', 'conflicts'].includes(roleKind(b.role))) throw new Error(`The ${roleName(b.role)} cannot lead a ticket: pick the role that owns most of the work.`);
+  if ((!plan || lead) && !p.activeRoles.includes(b.role)) throw new Error(`${p.name} has no ${roleName(b.role)}. Turn the role on in the project's settings first.`);
   const kind = plan ? '' : roleKind(b.role);
   // The Code Reviewer only reads; the Conflict Fixer always changes (it commits a merge).
   const mode = plan || kind === 'review' ? 'analyze' : kind === 'conflicts' ? 'change' : b.mode === 'analyze' ? 'analyze' : 'change';
@@ -1164,12 +1240,13 @@ async function createTask(b) {
     details = `monday.com ticket "${d.name}"${d.url ? ` (${d.url})` : ''}\n${cols}${ups ? `\n\nLatest updates on the ticket:\n${ups}` : ''}${details ? `\n\nFrom the owner:\n${details}` : ''}`;
   }
   return createTaskFromSpec({
-    projectId: p.id, role: plan ? 'architect' : b.role, mode, repo: repoName, base: special.base || G.cleanRef(b.base),
+    projectId: p.id, role: plan && !lead ? 'architect' : b.role, mode, repo: repoName, base: special.base || G.cleanRef(b.base),
     title, details, model: String(b.model || ''), ticket,
     review: special.review || null, mergeTarget: special.mergeTarget || '',
     // Per-task overrides from the Assign dialog; blank fields fall back to role/project/app limits.
     limits: cleanLimits({ taskBudgetUsd: b.budgetUsd, taskTimeoutMin: b.timeoutMin }),
     planTask: plan, origin: 'owner',
+    lead: lead ? { practice: on(b.practice), state: 'planning' } : null,
   });
 }
 
@@ -1179,7 +1256,7 @@ function createTaskFromSpec(spec, { deferPump = false } = {}) {
     id: newId('t'), projectId: spec.projectId, role: spec.role, mode: spec.mode, repo: spec.repo, base: spec.base || '',
     title: String(spec.title).slice(0, 200), details: String(spec.details || '').slice(0, 8000), model: spec.model || '',
     ticket: spec.ticket || null, limits: spec.limits || {},
-    planTask: !!spec.planTask, parentId: spec.parentId || '', prevId: spec.prevId || '', dependsOn: spec.dependsOn || [],
+    planTask: !!spec.planTask, lead: spec.lead || null, leadId: spec.leadId || '', parentId: spec.parentId || '', prevId: spec.prevId || '', dependsOn: spec.dependsOn || [],
     chainDepth: spec.chainDepth || 0, origin: spec.origin || 'owner', planKey: spec.planKey || '',
     review: spec.review || null, mergeTarget: spec.mergeTarget || '', mergeFrom: spec.mergeFrom || [],
     status: 'queued', createdAt: Date.now(), queuedAt: Date.now(), costUsd: 0, turns: 0, history: [],
