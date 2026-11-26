@@ -19,6 +19,10 @@ machine with your own Claude login. Nothing is hosted anywhere.
 - **Plans with parallel steps.** The Architect splits a feature into linked tasks. Steps that don't
   depend on each other run at the same time, each on its own branch. The Conflict Fixer then merges
   those branches, so you review one branch.
+- **Lead a ticket.** Give a ticket to one agent and tick **Lead it**. That agent reviews the ticket
+  and the code, splits the work across the crew by role and starts it straight away. You get one
+  checked, reviewed branch per repo, and nothing is pushed. A **practice run** does the same, then
+  deletes the branches and keeps only what the crew learned.
 - **Handoffs.** When a finished task needs another role next (tests for new code, say, or a schema
   change), Dev Crew proposes it, or starts it automatically if you allow that.
 - **Daily stand-ups** per project: health, what's done and blocked, risks, decisions for you, and
@@ -291,6 +295,27 @@ as **Blocked**, and go back in the queue once it is done (for example after **Co
 
 The task panel's **Chain** section shows where a task came from and what came after it.
 
+### Lead a ticket
+
+In **Assign**, pick the agent and tick **Lead it**: the Backend Engineer, say, for an API ticket.
+That agent leads the ticket like a senior engineer would:
+
+1. It reads the ticket and the code it touches, and says what has to change and where.
+2. It splits the work across the crew by role, including its own role, and names the files each
+   step touches so that parallel steps don't collide.
+3. The plan **starts on its own**, whatever your handoff setting is.
+4. Parallel branches are merged by the Conflict Fixer, Dev Crew runs your checks (with fix-up
+   rounds), and the Code Reviewer reviews the final branch.
+5. The lead's task panel then shows **one branch per repo** with its changes, checks and review.
+   Nothing is pushed: you review the branch and push it yourself.
+
+If a step fails or gets blocked, the ticket shows **Needs you** until you continue it.
+
+Tick **Practice run** as well to train the crew on a project without keeping anything. The work is
+done for real in throwaway branches. At the end Dev Crew keeps the change itself on the panel to
+read, deletes the branches and worktrees, and keeps the lessons each agent wrote (the Lessons tab),
+which every later run on that repo uses. A practice run costs the same as a real one.
+
 ## Roles
 
 Each role is written as a senior specialist with about ten years in the job: how they work, what
@@ -542,6 +567,7 @@ lib/toast.mjs       Windows notifications from the server, and their one-time ac
 lib/quality.mjs     quality profiles: suggested commands, the review checklist, running the checks
 lib/lessons.mjs     lessons from past runs: collected, ranked and given to the next runs
 lib/workflow.mjs    after a change: fix-up rounds, automatic review, and the default base branch
+lib/lead.mjs        a ticket led by one agent: where it stands, its final branches, practice runs
 scripts/graph-trial.mjs  measures a knowledge graph: the same questions with and without it
 lib/prompts.mjs     task, report and stand-up prompts
 lib/claude.mjs      runs `claude -p`, and the allow/deny tool lists
